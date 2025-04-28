@@ -1,11 +1,34 @@
 from fastapi import FastAPI
-
+from fastapi.middleware.cors import CORSMiddleware
+from routers import auth
+from routers import user
+from routers import sample_test
+import os
+from dotenv import load_dotenv
+app = FastAPI(debug=True)
+# Load environment variables from .env file
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"greeting": "Hello, World!", "message": "LESSSSSGAWWWW, fastapi backend  naten guys deployed to sa railway"}
+# Load environment FIRST before configuring middleware
+load_dotenv()
 
-@app.get("/JC")
-async def root():
-    return {"Eto sample jc"}
+# Configure CORS BEFORE adding routers
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",  # Add this alternative localhost
+    os.getenv("LOCAL_FRONT", "http://localhost:5173"),
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"]  # Add this line to expose headers
+)
+
+# Then add your routers
+app.include_router(auth.router)
+app.include_router(user.router)
+app.include_router(sample_test.router)

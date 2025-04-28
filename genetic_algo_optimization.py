@@ -1,0 +1,7 @@
+"""
+Hard Constraints
+
+
+Soft Constraints
+
+"""
