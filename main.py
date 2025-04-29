@@ -17,6 +17,7 @@ origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",  # Add this alternative localhost
     os.getenv("LOCAL_FRONT", "http://localhost:5173"),
+    os.getenv("DEPLOYED_FRONT")
 ]
 
 app.add_middleware(
