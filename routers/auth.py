@@ -7,7 +7,8 @@ from auth.auth_handler import (
     authenticate_user,
     ACCESS_TOKEN_EXPIRE_MINUTES,
     create_access_token,
-    get_password_hash
+    get_password_hash,
+    verify_password
 )
 from auth.email_verification import (
     create_verification_token,
@@ -17,7 +18,7 @@ from auth.email_verification import (
     activate_user
 )
 from database import get_database
-from schemas import Token, UserCreate, UserResponse, UserRole
+from schemas import Token, UserCreate, UserResponse, UserRole, UserCredentials
 from modelsv1 import User, VerificationResponse
 import os
 
@@ -116,10 +117,10 @@ async def authenticate_user(db, email: str, password: str):
 
 @router.post("/token", response_model=Token)
 async def login_for_access_token(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    credentials: UserCredentials,
     db = Depends(get_database)
 ) -> Token:
-    user = await authenticate_user(db, form_data.username, form_data.password)
+    user = await authenticate_user(db, credentials.email, credentials.password)
 
     if not user:
         raise HTTPException(
@@ -129,10 +130,15 @@ async def login_for_access_token(
         )
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
     access_token = create_access_token(
-        data={"sub": user["email"], "role": user["role"]},
-        expires_delta=access_token_expires
-    )
+    data={
+        "sub": user["email"],
+        "role": user["role"],
+        **({"department": user["department"]} if user["role"] == "admin" else ({"organization": user["organization"]} if user["role"] == "student" else {})),
+    },
+    expires_delta=access_token_expires
+)
     return Token(access_token=access_token, token_type="bearer")
 
 @router.get("/verify", response_model=None)

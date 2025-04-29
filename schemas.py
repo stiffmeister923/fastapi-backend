@@ -32,6 +32,10 @@ class TokenData(BaseModel):
     """Schema for data encoded within the JWT."""
     username: Optional[str] = None
 
+class UserCredentials(BaseModel):
+    email: str
+    password: str
+
 # --- User Schemas ---
 class UserBase(BaseModel):
     """Base schema for user properties."""

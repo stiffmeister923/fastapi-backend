@@ -8,4 +8,16 @@ router = APIRouter()
 
 @router.get("/users/me/", response_model=UserResponse)
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
-    return current_user
+    response_data = {
+        "id": str(current_user["_id"]),
+        "email": current_user["email"],
+        "role": current_user["role"],
+        "is_active": current_user["is_active"],
+    }
+
+    if current_user["role"] == "student":
+        response_data["organization"] = current_user.get("organization")
+    elif current_user["role"] == "admin":
+        response_data["department"] = current_user.get("department")
+
+    return response_data
