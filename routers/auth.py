@@ -82,7 +82,7 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
         await store_verification_token(db, user_id, verification_token)
 
         # Construct verification URL (replace with your actual frontend URL)
-        verification_url = f"{os.getenv('LOCAL_BACK')}/auth/verify?token={verification_token}"
+        verification_url = f"{os.getenv('DEPLOYED_BACK')}/auth/verify?token={verification_token}"
         await send_verification_email(user.email, verification_url)
 
         # Update organization with representative if needed
