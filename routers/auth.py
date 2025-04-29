@@ -2,17 +2,25 @@ from datetime import timedelta
 from fastapi import Depends, HTTPException, status, APIRouter
 from fastapi.security import OAuth2PasswordRequestForm
 from bson import ObjectId
-
+from motor.motor_asyncio import AsyncIOMotorClient
 from auth.auth_handler import (
-    authenticate_user, 
-    ACCESS_TOKEN_EXPIRE_MINUTES, 
-    create_access_token, 
-    get_user, 
+    authenticate_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    create_access_token,
     get_password_hash
+)
+from auth.email_verification import (
+    create_verification_token,
+    store_verification_token,
+    send_verification_email,
+    verify_token,
+    activate_user
 )
 from database import get_database
 from schemas import Token, UserCreate, UserResponse, UserRole
-from modelsv1 import User
+from modelsv1 import User, VerificationResponse
+import os
+
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 @router.post("/register", response_model=UserResponse)
@@ -24,11 +32,12 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
             status_code=400,
             detail="Email already registered"
         )
-    
-    # For student reps, ensure organization exists if provided
+
     organization_id = None
-    if user.organization:
-        if user.role == UserRole.STUDENT_REP:
+    department = None
+
+    if user.role == UserRole.STUDENT:
+        if user.organization:
             try:
                 org_id = ObjectId(user.organization)
                 org = await db.organizations.find_one({"_id": org_id})
@@ -38,18 +47,19 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
             except Exception:
                 raise HTTPException(status_code=400, detail="Invalid organization ID")
         else:
-            # Non-student reps shouldn't have organizations
             raise HTTPException(
                 status_code=400,
-                detail="Only student representatives can be associated with organizations"
+                detail="Organization ID is required for student users"
             )
-    elif user.role == UserRole.STUDENT_REP:
-        # Student reps must have an organization
-        raise HTTPException(
-            status_code=400, 
-            detail="Organization is required for student representatives"
-        )
-    
+    elif user.role == UserRole.ADMIN:
+        if user.department:
+            department = user.department
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Department is required for admin users"
+            )
+
     # Create and store the user
     hashed_password = get_password_hash(user.password)
     user_dict = {
@@ -57,54 +67,84 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
         "hashed_password": hashed_password,
         "role": user.role,
         "organization": organization_id,
+        "department": department,
+        "is_active": False  # New users are initially inactive
     }
-    
+
     try:
         result = await db.users.insert_one(user_dict)
-        user_dict["_id"] = result.inserted_id
-        
+        user_id = result.inserted_id
+        user_dict["_id"] = user_id
+
+        # Generate and store verification token
+        verification_token = create_verification_token(user.email)
+        await store_verification_token(db, user_id, verification_token)
+
+        # Construct verification URL (replace with your actual frontend URL)
+        verification_url = f"{os.getenv('LOCAL_FRONT')}/verify?token={verification_token}"
+        await send_verification_email(user.email, verification_url)
+
         # Update organization with representative if needed
-        if organization_id and user.role == UserRole.STUDENT_REP:
+        if organization_id and user.role == UserRole.STUDENT:
             await db.organizations.update_one(
                 {"_id": organization_id},
-                {"$set": {"representative": result.inserted_id}}
+                {"$set": {"representative": user_id}}
             )
-        
+
         # Convert ObjectId to string for response
         user_response = {
-            "_id": str(user_dict["_id"]),
+            "_id": str(user_id),
             "email": user_dict["email"],
             "role": user_dict["role"],
-            "organization": str(user_dict["organization"]) if user_dict["organization"] else None
+            "organization": str(user_dict["organization"]) if user_dict["organization"] else None,
+            "department": user_dict["department"]
         }
         return user_response
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-@router.get("/sample")
-async def root():
-    return {"greeting": "Hello, World!", "message": "LESSSSSGAWWWW, fastapi backend  naten guys deployed to sa railway"}
+async def authenticate_user(db, email: str, password: str):
+    user = await db.users.find_one({"email": email})
+    if not user:
+        return False
+    if not user.get("is_active"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not verified")
+    if not verify_password(password, user["hashed_password"]):
+        return False
+    return user
 
 @router.post("/token", response_model=Token)
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db = Depends(get_database)
 ) -> Token:
-    # Find user in database by username (which is email in our case)
     user = await authenticate_user(db, form_data.username, form_data.password)
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password, bitch ass nigga",
+            detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Create access token
+
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user["email"], "role": user["role"]},
         expires_delta=access_token_expires
     )
     return Token(access_token=access_token, token_type="bearer")
+
+@router.get("/verify", response_model=None)
+async def verify_email(token: str, db: AsyncIOMotorClient = Depends(get_database)):
+    """Verifies the email using the token sent to the user."""
+    user_data = await verify_token(db, token)
+    if not user_data:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification token")
+
+    db_instance: AsyncIOMotorClient = db  # Explicitly type the dependency instance
+    updated_user = await activate_user(db_instance, user_data["email"])
+    if updated_user:
+        return {"message": "Email successfully verified. You can now log in."}
+    else:
+        raise HTTPException(status_code=status.HTTP_500, detail="Error activating user account")
