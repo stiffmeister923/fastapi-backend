@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import datetime, timedelta
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -8,11 +9,13 @@ from schemas import UserResponse
 from bson import ObjectId
 from dotenv import load_dotenv
 from typing import Optional
-import os
+
 from mailjet_rest import Client
 # Load environment variables
 load_dotenv()
-
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS = 24
@@ -49,14 +52,36 @@ async def verify_token(db: AsyncIOMotorClient, token: str) -> Optional[dict]:
 
 async def activate_user(db: AsyncIOMotorClient, email: str) -> Optional[UserResponse]:
     """Activates the user account by setting is_active to True and removing the token."""
+    logger.info(f"Activating user with email: {email}")
+    user = await db.users.find_one({"email": email})
+    if not user:
+        logger.warning(f"User not found: {email}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    if user.get("is_active", False):
+        logger.info(f"User already activated: {email}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User already activated"
+        )
+
     update_result = await db.users.update_one(
-        {"email": email},
+        {"email": email, "is_active": False},
         {"$set": {"is_active": True}, "$unset": {"verification_token": ""}}
     )
+
+    logger.info(f"Update result: modified_count={update_result.modified_count}")
     if update_result.modified_count == 1:
-        user = await db.users.find_one({"email": email})
-        return UserResponse(**{**user, "id": str(user["_id"])})
-    return None
+        updated_user = await db.users.find_one({"email": email})
+        return UserResponse(**{**updated_user, "id": str(updated_user["_id"])})
+    else:
+        logger.warning(f"Failed to activate user: {email}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to activate user, possibly already activated"
+        )
 
 async def send_verification_email(email: str, verification_url: str):
     """Sends the verification email using Mailjet API."""

@@ -118,7 +118,7 @@ class UserUpdate(UserBase):
 
 class UserResponse(BaseModel):
     """Schema for returning user data in responses (excluding sensitive info)."""
-    id: str = Field(..., alias="_id")
+    id: str 
     email: EmailStr
     role: UserRole
     organization: Optional[str] = None

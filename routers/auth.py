@@ -2,7 +2,7 @@ from datetime import timedelta
 from fastapi import Depends, HTTPException, status, APIRouter
 from fastapi.security import OAuth2PasswordRequestForm
 from bson import ObjectId
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from auth.auth_handler import (
     authenticate_user,
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -81,7 +81,7 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
         await store_verification_token(db, user_id, verification_token)
 
         # Construct verification URL (replace with your actual frontend URL)
-        verification_url = f"{os.getenv('LOCAL_FRONT')}/verify?token={verification_token}"
+        verification_url = f"{os.getenv('LOCAL_BACK')}/auth/verify?token={verification_token}"
         await send_verification_email(user.email, verification_url)
 
         # Update organization with representative if needed
@@ -136,15 +136,32 @@ async def login_for_access_token(
     return Token(access_token=access_token, token_type="bearer")
 
 @router.get("/verify", response_model=None)
-async def verify_email(token: str, db: AsyncIOMotorClient = Depends(get_database)):
+async def verify_email(
+    token: str, db: AsyncIOMotorDatabase = Depends(get_database)
+):
     """Verifies the email using the token sent to the user."""
-    user_data = await verify_token(db, token)
-    if not user_data:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification token")
+    payload = await verify_token(db, token)
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired verification token",
+        )
 
-    db_instance: AsyncIOMotorClient = db  # Explicitly type the dependency instance
-    updated_user = await activate_user(db_instance, user_data["email"])
+    email = payload.get("email")
+    updated_user = await activate_user(db, email)
     if updated_user:
         return {"message": "Email successfully verified. You can now log in."}
-    else:
-        raise HTTPException(status_code=status.HTTP_500, detail="Error activating user account")
+    
+    # Check if the user is already activated
+    user = await db.users.find_one({"email": email})
+    if user and user.get("is_active", False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User account is already activated"
+        )
+    
+    # Fallback for other errors
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="Error activating user account"
+    )
