@@ -18,10 +18,13 @@ from auth.email_verification import (
     activate_user
 )
 from database import get_database
-from schemas import Token, UserCreate, UserResponse, UserRole, UserCredentials
+from schemas import Token, UserCreate, UserResponse, UserRole, UserCredentials, OrganizationResponse, OrganizationCreate
 from modelsv1 import User, VerificationResponse
 import os
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 @router.post("/register", response_model=UserResponse)
@@ -34,6 +37,7 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
             detail="Email already registered"
         )
 
+    
     organization_id = None
     department = None
 
@@ -82,14 +86,14 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
         await store_verification_token(db, user_id, verification_token)
 
         # Construct verification URL (replace with your actual frontend URL)
-        verification_url = f"{os.getenv('DEPLOYED_BACK')}/auth/verify?token={verification_token}"
+        verification_url = f"{os.getenv('LOCAL_BACK')}/auth/verify?token={verification_token}"
         await send_verification_email(user.email, verification_url)
 
         # Update organization with representative if needed
         if organization_id and user.role == UserRole.STUDENT:
             await db.organizations.update_one(
                 {"_id": organization_id},
-                {"$set": {"representative": user_id}}
+                {"$addToSet": {"members": user_id}}
             )
 
         # Convert ObjectId to string for response
@@ -105,15 +109,10 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-async def authenticate_user(db, email: str, password: str):
-    user = await db.users.find_one({"email": email})
-    if not user:
-        return False
-    if not user.get("is_active"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not verified")
-    if not verify_password(password, user["hashed_password"]):
-        return False
-    return user
+
+
+
+        
 
 @router.post("/token", response_model=Token)
 async def login_for_access_token(
@@ -131,14 +130,23 @@ async def login_for_access_token(
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
-    access_token = create_access_token(
-    data={
+    token_payload_data = {
         "sub": user["email"],
         "role": user["role"],
-        **({"department": user["department"]} if user["role"] == "admin" else ({"organization": user["organization"]} if user["role"] == "student" else {})),
-    },
-    expires_delta=access_token_expires
-)
+    }
+
+    # Add role-specific claims, converting ObjectId to string if needed
+    if user["role"] == UserRole.ADMIN.value and user.get("department"):
+        token_payload_data["department"] = user["department"]
+    elif user["role"] == UserRole.STUDENT.value and user.get("organization"):
+        # --- Convert ObjectId to string HERE ---
+        token_payload_data["organization"] = str(user["organization"]) 
+        
+    access_token = create_access_token(
+        data=token_payload_data,
+        expires_delta=access_token_expires
+    )
+
     return Token(access_token=access_token, token_type="bearer")
 
 @router.get("/verify", response_model=None)

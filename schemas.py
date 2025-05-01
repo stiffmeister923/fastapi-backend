@@ -191,6 +191,7 @@ class OrganizationResponse(BaseModel):
     description: Optional[str] = None
     faculty_advisor_email: EmailStr
     members: List[str] # List of member User IDs as strings for response
+    events: List[str]
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -205,6 +206,7 @@ class OrganizationResponse(BaseModel):
                 "description": "Organization for CS students",
                 "faculty_advisor_email": "faculty@yourdomain.edu",
                 "members": ["60d5ec9af682dbd12a0a9fb7"],
+                "events":["56123123"],
                 "created_at": "2023-06-21T12:00:00Z", # Use ISO format for examples
                 "updated_at": "2023-06-22T15:30:00Z"
             }
@@ -240,36 +242,106 @@ class ScheduleUpdate(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True) 
 
+class EventRequestStatus(str, Enum):
+    PENDING = "Pending"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+
+# --- Add this Schema for Requested Equipment ---
+class RequestedEquipmentItem(BaseModel):
+    """Schema for an item in the list of requested equipment."""
+    equipment_id: str = Field(..., description="ID of the requested equipment item")
+    quantity: int = Field(..., gt=0, description="Quantity of the equipment item needed") # Ensure quantity is positive
+
+    # Add validation for equipment_id format if desired
+    @field_validator("equipment_id")
+    @classmethod
+    def validate_equipment_id(cls, v: str) -> str:
+        if not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format for equipment_id: {v}")
+        return v
+
 # --- Events Schemas ---
 class EventBase(BaseModel):
-    event_name: str
-    organization_id: str
+    """Base schema for event request properties."""
+    event_name: str = Field(..., min_length=3, max_length=100, description="Name of the event")
+    #organization_id: str # Removed - will be inferred from user
     requires_funding: bool = False
-    estimated_attendees: int = 0
-    requested_date: time
-    requested_time_start: time
-    requested_time_end: time
+    estimated_attendees: int = Field(0, ge=0) # Ensure non-negative
+    # Ensure correct types are used
+    requested_date: datetime = Field(..., description="Preferred date for the event (YYYY-MM-DD)")
+    requested_time_start: datetime = Field(..., description="Preferred start time (HH:MM:SS)")
+    requested_time_end: datetime = Field(..., description="Preferred end time (HH:MM:SS)")
+    # Add description field if needed by frontend/backend logic
+    description: Optional[str] = Field(None, max_length=500, description="Optional detailed description") 
 
-    model_config = ConfigDict(arbitrary_types_allowed=True) 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class EventCreate(EventBase):
-    pass
+    """Schema used for creating a new event request via the API."""
+    # Add fields for specific requests
+    requested_venue_id: Optional[str] = Field(None, description="ID of the initially requested venue (optional)")
+    requested_equipment: Optional[List[RequestedEquipmentItem]] = Field(None, description="List of requested equipment items (optional)")
+
+    # Add validation for requested_venue_id format if provided
+    @field_validator("requested_venue_id")
+    @classmethod
+    def validate_venue_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format for requested_venue_id: {v}")
+        return v
+        
+    model_config = ConfigDict(
+         json_schema_extra = { # Example for API docs
+            "example": {
+                "event_name": "Annual Programming Contest",
+                "description": "Coding competition for students.",
+                "requires_funding": True,
+                "estimated_attendees": 50,
+                "requested_date": "2025-11-15",
+                "requested_time_start": "09:00:00",
+                "requested_time_end": "15:00:00",
+                "requested_venue_id": "60d5f1b4f682dbd12a0a9fc1", # Example Venue ID
+                "requested_equipment": [
+                    {"equipment_id": "60d5f2a0f682dbd12a0a9fc5", "quantity": 10}, # Example Equipment ID & Qty
+                    {"equipment_id": "60d5f2a0f682dbd12a0a9fc6", "quantity": 1}
+                ]
+            }
+        }
+    )
 
 class EventResponse(EventBase):
-    id: str = Field(..., alias="_id")
-    approval_status: str
-    schedule_id: Optional[str] = None
+    """Schema for returning event data in API responses."""
+    id: str = Field(..., alias="_id", description="Unique ID of the event request")
+    organization_id: str = Field(..., description="ID of the requesting organization")
+    requesting_user_id: str = Field(..., description="ID of the user who submitted the request")
+    approval_status: EventRequestStatus = Field(..., description="Current status of the request") # Use Enum
+    schedule_id: Optional[str] = Field(None, description="ID of the associated schedule (if approved and scheduled)")
+    request_document_key: Optional[str] = Field(None, description="S3 key for the uploaded request document (if any)")
+    # Add requested venue/equipment if needed in response
+    requested_venue_id: Optional[str] = None 
+    # Note: Displaying requested equipment might require another query or embedding
+    requested_equipment: Optional[List[...]] = None # Decide if needed
+    created_at: datetime = Field(..., description="Timestamp when the request was created")
 
-    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True) 
 
+    model_config = ConfigDict(
+        populate_by_name=True, # Allows mapping _id to id
+        arbitrary_types_allowed=True,
+        json_encoders={
+            ObjectId: str, 
+            # Ensure datetime is serialized correctly to ISO format string
+            datetime: lambda dt: dt.isoformat() if isinstance(dt, datetime) else None 
+        } 
+    )
 class EventUpdate(BaseModel):
     event_name: Optional[str] = None
-    organization_id: Optional[str] = None
+    
     requires_funding: Optional[bool] = None
     estimated_attendees: Optional[int] = None
-    requested_date: Optional[time] = None
-    requested_time_start: Optional[time] = None
-    requested_time_end: Optional[time] = None
+    requested_date: Optional[date] = None
+    requested_time_start: Optional[datetime] = None
+    requested_time_end: Optional[datetime] = None
     approval_status: Optional[str] = None
     schedule_id: Optional[str] = None
 
@@ -277,21 +349,82 @@ class EventUpdate(BaseModel):
 
 # --- Preference Schemas ---
 class PreferenceBase(BaseModel):
-    event_id: str
-    preferred_venue: Optional[str] = None
-    preferred_date: Optional[time] = None
-    preferred_time_slot_start: Optional[time] = None
-    preferred_time_slot_end: Optional[time] = None
+    """Base schema for event preference properties."""
+    event_id: str = Field(..., description="ID of the main event request this preference belongs to")
+    preferred_venue_id: Optional[str] = Field(None, description="ID of the alternative preferred venue (optional)")
+    # Keep preferred_date as date for input clarity
+    preferred_date: Optional[date] = Field(None, description="Alternative preferred date (YYYY-MM-DD, optional)")
+    # Use datetime for time slots for consistency with Event schema
+    preferred_time_slot_start: Optional[datetime] = Field(None, description="Alternative preferred start time (ISO 8601 format, optional)")
+    preferred_time_slot_end: Optional[datetime] = Field(None, description="Alternative preferred end time (ISO 8601 format, optional)")
 
-    model_config = ConfigDict(arbitrary_types_allowed=True) 
+    # Add validators for ID formats
+    @field_validator("event_id", "preferred_venue_id")
+    @classmethod
+    def validate_objectid_format(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format: {v}")
+        return v
+
+    # Optional: Add validator to ensure if start time is given, end time is also given and is later
+    @field_validator('preferred_time_slot_end')
+    @classmethod
+    def validate_time_slots(cls, v: Optional[datetime], info: FieldValidationInfo) -> Optional[datetime]:
+        start_time = info.data.get('preferred_time_slot_start')
+        if start_time and v:
+            if v <= start_time:
+                raise ValueError("Preferred end time must be after preferred start time")
+        elif start_time and not v:
+            raise ValueError("Preferred end time is required if start time is provided")
+        elif not start_time and v:
+             raise ValueError("Preferred start time is required if end time is provided")
+        return v
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_schema_extra={
+            "example": {
+                "event_id": "681293885b447dc3f525bbf3", # ID of the original event request
+                "preferred_venue_id": "68129f0c6d0bee76fee415e9", # Example alternative venue ID
+                "preferred_date": "2025-11-29",
+                "preferred_time_slot_start": "2025-11-29T10:00:00Z", # Use ISO format with timezone
+                "preferred_time_slot_end": "2025-11-29T12:00:00Z"
+            }
+        }
+    )
 
 class PreferenceCreate(PreferenceBase):
-    pass
+    """Schema used for creating a new event preference via the API."""
+    # Inherits all fields and validation from PreferenceBase
+    pass # No additional fields needed for creation specific schema
 
 class PreferenceResponse(PreferenceBase):
-    event_id: str = Field(..., alias="_id")
+    """Schema for returning preference data in API responses."""
+    # Use Field alias to map MongoDB's _id to 'id' in the response
+    id: str = Field(..., alias="_id", description="Unique ID of the preference record")
+    # Include created_at timestamp if you add it to the model/DB
+    # created_at: datetime = Field(..., description="Timestamp when the preference was created")
 
-    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True) 
+    model_config = ConfigDict(
+        populate_by_name=True, # Allows mapping _id to id
+        arbitrary_types_allowed=True,
+        json_encoders={ # Ensure consistent serialization
+            ObjectId: str,
+            datetime: lambda dt: dt.isoformat().replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
+            date: lambda d: d.isoformat() if isinstance(d, date) else None
+        },
+         json_schema_extra={
+            "example": {
+                "_id": "6813a0f5e4b0d6c7e8f9a1b2", # Example generated preference ID
+                "event_id": "681293885b447dc3f525bbf3",
+                "preferred_venue_id": "68129f0c6d0bee76fee415e9",
+                "preferred_date": "2025-11-29",
+                "preferred_time_slot_start": "2025-11-29T10:00:00Z",
+                "preferred_time_slot_end": "2025-11-29T12:00:00Z"
+                # "created_at": "2025-05-01T18:55:00Z" # Example timestamp
+            }
+        }
+    )
 
 class PreferenceUpdate(BaseModel):
     preferred_venue: Optional[str] = None
@@ -335,26 +468,42 @@ class EquipmentBase(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True) 
 
-class EquipmentCreate(EquipmentBase):
-    pass
-
 class EquipmentResponse(EquipmentBase):
+    """Schema for returning equipment data in responses."""
     id: str = Field(..., alias="_id")
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True) 
 
+class EquipmentCreate(EquipmentBase):
+    pass
+
+class EventResponse(EventBase):
+    id: str = Field(..., alias="_id")
+    approval_status: str
+    schedule_id: Optional[str] = None
+    
+    request_document_key: Optional[str] = None # Store the S3 object key
+
+    model_config = ConfigDict(
+        populate_by_name=True, 
+        arbitrary_types_allowed=True,
+        # Add ObjectId encoder if needed, ensure datetime handled if present
+        json_encoders={ObjectId: str} 
+    ) 
 class EquipmentUpdate(BaseModel):
     name: Optional[str] = None
     availability: Optional[str] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True) 
 
+
+
 # --- EventEquipment Schemas ---
 class EventEquipmentBase(BaseModel):
     event_id: str
     equipment_id: str
     quantity: int = 1
-
+    
     model_config = ConfigDict(arbitrary_types_allowed=True) 
 
 class EventEquipmentCreate(EventEquipmentBase):

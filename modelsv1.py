@@ -1,6 +1,6 @@
 # models.py
 from pydantic import BaseModel, Field, ConfigDict, validator, EmailStr
-from datetime import date, time, datetime
+from datetime import date, time, datetime, timezone
 from typing import List, Optional, Any
 from bson import ObjectId
 from enum import Enum
@@ -144,25 +144,50 @@ class ScheduleCreateInternal(BaseModel):
         json_encoders={ObjectId: str}
     )
 
-# --- Events Models ---
+class EventRequestStatus(str, Enum):
+    PENDING = "Pending"
+    APPROVED = "Approved"
+    REJECTED = "Rejected"
+
+# --- Updated Event Model ---
 class Event(BaseModel):
-    """Model representing an Event document in the database."""
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    """Model representing an Event Request document in the database."""
+    # Let MongoDB automatically generate the '_id' field upon insertion.
+    
     event_name: str
-    organization_id: PyObjectId
+    description: Optional[str] = None 
+    
+    # Link to Organization and User using PyObjectId internally
+    organization_id: PyObjectId 
+    requesting_user_id: PyObjectId 
+    
+    # Event details
     requires_funding: bool = False
-    estimated_attendees: int = 0
-    requested_date: date
-    requested_time_start: time
-    requested_time_end: time
-    approval_status: str = "Pending"  # Using str for simplicity, could be Enum later
-    schedule_id: Optional[PyObjectId] = None
+    estimated_attendees: int = Field(0, ge=0) 
+    
+    # --- Change requested_date to datetime ---
+    requested_date: datetime # Changed from date
+    requested_time_start: datetime 
+    requested_time_end: datetime   
+    
+    # Requested Venue (Primary) - Store as ID link
+    requested_venue_id: Optional[PyObjectId] = None 
+    
+    # Note: Requested Equipment is handled via the separate EventEquipment collection
+    
+    # Status and Tracking
+    approval_status: EventRequestStatus = EventRequestStatus.PENDING 
+    request_document_key: Optional[str] = None 
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc)) 
+    
+    # Link to the final schedule (if approved)
+    schedule_id: Optional[PyObjectId] = None 
 
     model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        json_encoders={ObjectId: str},
-        populate_by_name=True
+        arbitrary_types_allowed=True, 
+        json_encoders={ObjectId: str}, 
     )
+
 
 class EventCreateInternal(BaseModel):
     """Model for creating an event internally."""
@@ -181,12 +206,14 @@ class EventCreateInternal(BaseModel):
 
 # --- Preference Models ---
 class Preference(BaseModel):
-    """Model representing event preferences for the genetic algorithm."""
-    event_id: PyObjectId = Field(..., alias="_id") # Using event_id as _id for direct link
-    preferred_venue: Optional[str] = None
-    preferred_date: Optional[date] = None
-    preferred_time_slot_start: Optional[time] = None
-    preferred_time_slot_end: Optional[time] = None
+    """Model representing event preferences (alternatives)."""
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id") 
+    event_id: PyObjectId = Field(..., description="Link to the main event request") 
+    preferred_venue_id: Optional[PyObjectId] = None 
+    # --- Change time fields to datetime ---
+    preferred_date: Optional[date] = None # Keep date for day preference
+    preferred_time_slot_start: Optional[datetime] = None # Changed from time
+    preferred_time_slot_end: Optional[datetime] = None   # Changed from time
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -262,7 +289,7 @@ class EquipmentCreateInternal(BaseModel):
 # --- EventEquipment (Linking Table) Model ---
 class EventEquipment(BaseModel):
     """Model representing the linking table between Events and Equipment."""
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id") # MongoDB needs an _id
+    #id: PyObjectId = Field(default_factory=PyObjectId, alias="_id") # MongoDB needs an _id
     event_id: PyObjectId
     equipment_id: PyObjectId
     quantity: int = 1

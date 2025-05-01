@@ -1,8 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth
-from routers import user
-from routers import sample_test
+from routers import (
+    sample_test,
+    auth,
+    user, 
+    org, 
+    events, 
+    venue, 
+    equipment,
+    events )# Import equipment
+
 import os
 from dotenv import load_dotenv
 app = FastAPI(debug=True)
@@ -33,3 +40,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(sample_test.router)
+app.include_router(org.router)
+app.include_router(venue.router)
+app.include_router(equipment.router)
+app.include_router(events.router)
