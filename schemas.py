@@ -217,35 +217,76 @@ class OrganizationResponse(BaseModel):
 from pydantic import FieldValidationInfo # Import at top if not already there
 
 
-# --- Schedule Schemas ---
+# --- Updated Schedule Schemas ---
 class ScheduleBase(BaseModel):
-    venue_id: str
-    scheduled_date: time
-    scheduled_time_start: time
-    scheduled_time_end: time
+    """Base schema for schedule properties."""
+    venue_id: str = Field(..., description="ID of the scheduled venue")
+    scheduled_start_time: datetime = Field(..., description="Scheduled start date and time (ISO 8601 format)")
+    scheduled_end_time: datetime = Field(..., description="Scheduled end date and time (ISO 8601 format)")
+    # event_id is usually not needed for creation via API, but added in response
 
-    model_config = ConfigDict(arbitrary_types_allowed=True) 
+    # Optional: Add validator for end time > start time
+    @field_validator('scheduled_end_time')
+    @classmethod
+    def validate_end_after_start(cls, v: datetime, info: FieldValidationInfo) -> datetime:
+        start_time = info.data.get('scheduled_start_time')
+        if start_time and v <= start_time:
+            raise ValueError("Scheduled end time must be after scheduled start time")
+        return v
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+         json_encoders={ # Ensure consistent serialization for examples/input
+            ObjectId: str,
+            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
+        }
+        )
 
 class ScheduleCreate(ScheduleBase):
+    """Schema for creating a schedule (potentially via a dedicated endpoint, though not used here)."""
+    # Usually linked to an event, so event_id might be needed depending on API design
+    # event_id: str = Field(..., description="ID of the event being scheduled")
     pass
 
 class ScheduleResponse(ScheduleBase):
-    id: str = Field(..., alias="_id")
+    """Schema for returning schedule data in API responses."""
+    id: str = Field(..., alias="_id", description="Unique ID of the schedule entry")
+    event_id: str = Field(..., description="ID of the associated event") # Add event_id to response
 
-    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True) 
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ # Ensure consistent serialization for output
+            ObjectId: str,
+            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
+            # date: lambda d: d.isoformat() if isinstance(d, date) else None # Keep if date objects are used elsewhere
+        },
+        json_schema_extra={
+            "example": {
+                "_id": "681a0b1c2d3e4f5a6b7c8d9e",
+                "event_id": "6812e9c94c795e2a0717f49d",
+                "venue_id": "68129f0c6d0bee76fee415e8",
+                "scheduled_start_time": "2025-11-28T13:00:00Z",
+                "scheduled_end_time": "2025-11-28T17:00:00Z"
+            }
+        }
+        )
 
 class ScheduleUpdate(BaseModel):
+    """Schema for updating a schedule (optional fields)."""
     venue_id: Optional[str] = None
-    scheduled_date: Optional[time] = None
-    scheduled_time_start: Optional[time] = None
-    scheduled_time_end: Optional[time] = None
+    scheduled_start_time: Optional[datetime] = None
+    scheduled_end_time: Optional[datetime] = None
+    # Add validator if needed
 
-    model_config = ConfigDict(arbitrary_types_allowed=True) 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 class EventRequestStatus(str, Enum):
     PENDING = "Pending"
     APPROVED = "Approved"
     REJECTED = "Rejected"
+    NEEDS_ALTERNATIVES = "Needs_Alternatives"
+
 
 # --- Add this Schema for Requested Equipment ---
 class RequestedEquipmentItem(BaseModel):
@@ -316,6 +357,7 @@ class EventResponse(EventBase):
     organization_id: str = Field(..., description="ID of the requesting organization")
     requesting_user_id: str = Field(..., description="ID of the user who submitted the request")
     approval_status: EventRequestStatus = Field(..., description="Current status of the request") # Use Enum
+    admin_comment: Optional[str] = None
     schedule_id: Optional[str] = Field(None, description="ID of the associated schedule (if approved and scheduled)")
     request_document_key: Optional[str] = Field(None, description="S3 key for the uploaded request document (if any)")
     # Add requested venue/equipment if needed in response
@@ -346,6 +388,30 @@ class EventUpdate(BaseModel):
     schedule_id: Optional[str] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True) 
+
+class EventStatusUpdate(BaseModel):
+    """Schema for updating the approval status of an event request."""
+    approval_status: EventRequestStatus = Field(..., description="The new status for the event request (Approved or Rejected)")
+    admin_comment: Optional[str] = Field(None, max_length=500, description="Reason for status change (especially for rejection)") # <-- Added
+
+    # Optional: Add validator to require comment if status is Rejected
+    @field_validator('admin_comment')
+    @classmethod
+    def comment_required_for_rejection(cls, v: Optional[str], info: FieldValidationInfo) -> Optional[str]:
+        """Requires a comment if the status is being set to Rejected."""
+        # info.data contains the data being validated
+        if 'approval_status' in info.data and info.data['approval_status'] == EventRequestStatus.REJECTED and not v:
+            raise ValueError("An admin comment is required when rejecting an event request.")
+        return v
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "approval_status": "Rejected",
+                "admin_comment": "Venue conflict with scheduled maintenance."
+            }
+        }
+    )
 
 # --- Preference Schemas ---
 class PreferenceBase(BaseModel):
@@ -477,19 +543,7 @@ class EquipmentResponse(EquipmentBase):
 class EquipmentCreate(EquipmentBase):
     pass
 
-class EventResponse(EventBase):
-    id: str = Field(..., alias="_id")
-    approval_status: str
-    schedule_id: Optional[str] = None
-    
-    request_document_key: Optional[str] = None # Store the S3 object key
 
-    model_config = ConfigDict(
-        populate_by_name=True, 
-        arbitrary_types_allowed=True,
-        # Add ObjectId encoder if needed, ensure datetime handled if present
-        json_encoders={ObjectId: str} 
-    ) 
 class EquipmentUpdate(BaseModel):
     name: Optional[str] = None
     availability: Optional[str] = None

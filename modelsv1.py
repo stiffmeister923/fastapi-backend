@@ -117,14 +117,17 @@ class OrganizationCreateInternal(BaseModel):
 #             raise ValueError("Organization ObjectId is required for student representatives")
 #         return v
 
-# --- Schedule Models ---
+# --- Updated Schedule Model ---
 class Schedule(BaseModel):
     """Model representing a Schedule document in the database."""
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    venue_id: PyObjectId
-    scheduled_date: date
-    scheduled_time_start: time
-    scheduled_time_end: time
+    event_id: PyObjectId # Link back to the event
+    venue_id: PyObjectId # The venue where it's scheduled
+    scheduled_start_time: datetime # Combined date and start time
+    scheduled_end_time: datetime   # Combined date and end time
+    # scheduled_date: date # Removed, redundant if using datetime
+    # scheduled_time_start: time # Removed
+    # scheduled_time_end: time # Removed
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -132,12 +135,13 @@ class Schedule(BaseModel):
         populate_by_name=True
     )
 
+# Optional: Update ScheduleCreateInternal if you use it elsewhere
 class ScheduleCreateInternal(BaseModel):
     """Model for creating a schedule internally."""
+    event_id: PyObjectId
     venue_id: PyObjectId
-    scheduled_date: date
-    scheduled_time_start: time
-    scheduled_time_end: time
+    scheduled_start_time: datetime
+    scheduled_end_time: datetime
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -148,6 +152,7 @@ class EventRequestStatus(str, Enum):
     PENDING = "Pending"
     APPROVED = "Approved"
     REJECTED = "Rejected"
+    NEEDS_ALTERNATIVES = "Needs_Alternatives"
 
 # --- Updated Event Model ---
 class Event(BaseModel):
@@ -177,6 +182,7 @@ class Event(BaseModel):
     
     # Status and Tracking
     approval_status: EventRequestStatus = EventRequestStatus.PENDING 
+    admin_comment: Optional[str] = None
     request_document_key: Optional[str] = None 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc)) 
     
