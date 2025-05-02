@@ -150,6 +150,7 @@ class OrganizationBase(BaseModel):
     name: str
     description: Optional[str] = None
     faculty_advisor_email: EmailStr
+    department: Optional[str] = None
 
 class OrganizationCreate(OrganizationBase):
     """Schema for creating a new organization (request body)."""
@@ -171,6 +172,7 @@ class OrganizationUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     faculty_advisor_email: Optional[EmailStr] = None
+    department: Optional[str] = None
     # Members will be updated through a separate mechanism
 
     model_config = ConfigDict(
@@ -190,6 +192,7 @@ class OrganizationResponse(BaseModel):
     name: str
     description: Optional[str] = None
     faculty_advisor_email: EmailStr
+    department: Optional[str] = None
     members: List[str] # List of member User IDs as strings for response
     events: List[str]
     created_at: datetime

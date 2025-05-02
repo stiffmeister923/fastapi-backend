@@ -72,6 +72,7 @@ class Organization(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     name: str
     description: Optional[str] = None
+    department: Optional[str] = None
     faculty_advisor_email: EmailStr  # Added faculty advisor email
     members: List[PyObjectId] = Field(default_factory=list) # List of member User IDs
     created_at: datetime = Field(default_factory=datetime.utcnow)

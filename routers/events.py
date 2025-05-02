@@ -5,7 +5,7 @@ from botocore.exceptions import NoCredentialsError, PartialCredentialsError, Cli
 import os
 import uuid
 import json
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Body, Path
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Body, Path, Query
 from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -166,6 +166,166 @@ async def _perform_event_cleanup(event_id: ObjectId, event_doc: Dict[str, Any], 
             print(f"Warning: Failed to delete S3 object {s3_key}: {s3_error}")
         except Exception as s3_gen_error:
              print(f"Warning: Unexpected error deleting S3 object {s3_key}: {s3_gen_error}")
+
+# === Endpoint: List Pending Event Requests ===
+@router.get(
+    "/pending",
+    response_model=List[EventResponse],
+    summary="List pending requests (Admin: advised orgs, Student: own org)" # UPDATED Summary
+)
+async def list_pending_event_requests(
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Retrieves a list of event requests with 'Pending' status.
+    - Administrators see pending requests from organizations they advise.
+    - Students see only pending requests from their own organization.
+    """
+    user_role = current_user.get("role")
+    user_org_id = current_user.get("organization") # ObjectId or None
+    admin_email = current_user.get("email") # EmailStr or None
+
+    query: Dict[str, Any] = {"approval_status": EventRequestStatus.PENDING.value}
+    org_ids_to_query: Optional[List[ObjectId]] = None # Used for admin filtering
+
+    if user_role == UserRole.ADMIN.value:
+        if not admin_email:
+            print(f"Warning: Admin user {current_user.get('_id')} has no email.")
+            return [] # Cannot find advised orgs without email
+
+        # Find organizations where this admin is the faculty advisor
+        org_cursor = db.organizations.find(
+            {"faculty_advisor_email": admin_email}, # Filter organizations by advisor email
+            {"_id": 1} # Project only the ID
+        )
+        org_ids_to_query = [org['_id'] async for org in org_cursor]
+
+        if not org_ids_to_query:
+            # No organizations found advised by this admin
+            return [] # Return empty list
+
+        # Add organization filter to the main query
+        query["organization_id"] = {"$in": org_ids_to_query}
+
+    elif user_role == UserRole.STUDENT.value:
+        if not user_org_id:
+            print(f"Warning: Student user {current_user.get('email')} has no organization_id.")
+            return []
+        query["organization_id"] = user_org_id # Filter by student's specific org ObjectId
+
+    else:
+        raise HTTPException(status_code=403, detail="Access denied for this user role.")
+
+    # --- Execute Query and Prepare Response ---
+    pending_events = []
+    try:
+        cursor = db.events.find(query).sort("created_at", 1) # Optional: sort by creation time
+        async for event_doc in cursor:
+            try:
+                response_dict = await _prepare_event_response_dict(event_doc, db)
+                pending_events.append(EventResponse(**response_dict))
+            except ValueError as prep_error: print(f"Error preparing response dict for event {event_doc.get('_id')}: {prep_error}")
+            except Exception as validation_error: print(f"Error validating EventResponse for event {event_doc.get('_id')}: {validation_error}")
+    except Exception as db_error:
+        print(f"Database error fetching pending events: {db_error}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve pending event requests.")
+
+    return pending_events
+
+# === Endpoint: List All Relevant Event Requests ===
+@router.get(
+    "/list",
+    response_model=List[EventResponse],
+    summary="List all requests (Admin: advised orgs, Student: own org)" # UPDATED Summary
+)
+async def list_relevant_event_requests(
+    status: Optional[List[EventRequestStatus]] = Query(None, description="Filter events by status"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Retrieves a list of all event requests relevant to the user.
+    - Administrators see requests from organizations they advise.
+    - Students see only requests from their own organization.
+    - Allows optional filtering by one or more statuses.
+    """
+    user_role = current_user.get("role")
+    user_org_id = current_user.get("organization") # ObjectId or None
+    admin_email = current_user.get("email") # EmailStr or None
+
+    query: Dict[str, Any] = {} # Start with an empty query
+    org_ids_to_query: Optional[List[ObjectId]] = None # Used for admin filtering
+
+    # --- Role-Based Filtering (Advisor Email for Admin) ---
+    if user_role == UserRole.ADMIN.value:
+        if not admin_email:
+            print(f"Warning: Admin user {current_user.get('_id')} has no email.")
+            return [] # Cannot find advised orgs without email
+
+        # Find organizations where this admin is the faculty advisor
+        org_cursor = db.organizations.find(
+            {"faculty_advisor_email": admin_email}, # Filter organizations by advisor email
+            {"_id": 1} # Project only the ID
+        )
+        org_ids_to_query = [org['_id'] async for org in org_cursor]
+
+        if not org_ids_to_query:
+            # No organizations found advised by this admin
+            return [] # Return empty list
+
+        # Add organization filter to the main query
+        query["organization_id"] = {"$in": org_ids_to_query}
+
+    elif user_role == UserRole.STUDENT.value:
+        if not user_org_id:
+            print(f"Warning: Student user {current_user.get('email')} has no organization_id.")
+            return []
+        query["organization_id"] = user_org_id # Filter by student's specific org ObjectId
+
+    else:
+        raise HTTPException(status_code=403, detail="Access denied for this user role.")
+
+    # --- Optional Status Filtering ---
+    if status:
+        status_values = [s.value for s in status]
+        query["approval_status"] = {"$in": status_values}
+
+    # --- Execute Query and Prepare Response ---
+    relevant_events = []
+    try:
+        cursor = db.events.find(query).sort("created_at", -1) # Sort by most recent first
+        async for event_doc in cursor:
+            try:
+                response_dict = await _prepare_event_response_dict(event_doc, db)
+                relevant_events.append(EventResponse(**response_dict))
+            except ValueError as prep_error: print(f"Error preparing response dict for event {event_doc.get('_id')}: {prep_error}")
+            except Exception as validation_error: print(f"Error validating EventResponse for event {event_doc.get('_id')}: {validation_error}")
+    except Exception as db_error:
+        print(f"Database error fetching relevant events: {db_error}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve relevant event requests.")
+
+    return relevant_events
+
+# === Helper Function to Prepare Event Response Dictionary ===
+async def _prepare_event_response_dict(event_doc: Dict[str, Any], db: AsyncIOMotorDatabase) -> Dict[str, Any]:
+    # ... (implementation as before) ...
+    if not event_doc or "_id" not in event_doc: raise ValueError("Invalid event document provided.")
+    event_id = event_doc["_id"]
+    formatted_equipment = await _get_formatted_equipment_for_event(event_id, db)
+    response_data: Dict[str, Any] = {}
+    for key, value in event_doc.items():
+        if key == "_id": response_data["id"] = str(value)
+        elif isinstance(value, ObjectId): response_data[key] = str(value)
+        elif isinstance(value, (datetime, date, time)): response_data[key] = value
+        elif key == "approval_status" and isinstance(value, str):
+             try: response_data[key] = EventRequestStatus(value)
+             except ValueError: response_data[key] = EventRequestStatus.PENDING
+        else: response_data[key] = value
+    response_data["requested_equipment"] = formatted_equipment
+    for field in EventResponse.model_fields:
+        if field not in response_data and field != 'id': response_data[field] = None
+    return response_data
 
 
 # === Endpoint to Submit an Event Request ===
@@ -335,10 +495,15 @@ async def submit_event_request(
                 if item.equipment_id not in valid_equipment_object_ids:
                      if inserted_event_id: await db.events.delete_one({"_id": inserted_event_id})
                      raise HTTPException(status_code=404, detail=f"Requested equipment ID '{item.equipment_id}' not found.")
+                # *** FIX: Convert IDs to strings BEFORE passing to EventEquipment model ***
+                event_id_str_for_model = str(inserted_event_id)
+                equipment_id_str_for_model = str(valid_equipment_object_ids[item.equipment_id])
 
+                # Create EventEquipment model instance using STRINGS
+                # The PyObjectId validator will convert these back to ObjectId internally
                 event_equipment_data = EventEquipment(
-                    event_id=inserted_event_id,
-                    equipment_id=valid_equipment_object_ids[item.equipment_id],
+                    event_id=event_id_str_for_model,
+                    equipment_id=equipment_id_str_for_model,
                     quantity=item.quantity
                 )
                 equipment_docs_to_insert.append(event_equipment_data.model_dump(by_alias=True))
@@ -472,7 +637,7 @@ async def submit_event_preference(
 
 # === Endpoint to Update Event Request Status (Admin Only) ===
 @router.patch(
-    "/{event_id}/status",
+    "approve/{event_id}/status",
     response_model=EventResponse,
     status_code=status.HTTP_200_OK,
     summary="Update status, add comment, create schedule on approval"
