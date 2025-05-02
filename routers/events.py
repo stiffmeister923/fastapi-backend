@@ -6,30 +6,29 @@ import os
 import uuid
 import json
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Body, Path
-from typing import List, Optional, Dict, Any # Added Dict, Any
+from typing import List, Optional, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from bson.errors import InvalidId
-# Import datetime, date, time, timezone
 from datetime import datetime, date, time, timezone, timedelta
 
 from database import get_database
 # --- Import Schemas ---
-# Use the updated schemas with datetime fields
+# Make sure EventRequestStatus enum in schemas includes CANCELLED
 from schemas import (
     EventCreate,
     EventResponse,
     UserResponse,
     UserRole,
     RequestedEquipmentItem,
-    EventRequestStatus,
-    PreferenceCreate,  # <--- Import PreferenceCreate
+    EventRequestStatus, # Ensure this includes CANCELLED
+    PreferenceCreate,
     PreferenceResponse,
     EventStatusUpdate
 )
 # --- Import DB Models ---
-# Use the updated Event model (without 'id' field) and EventEquipment
-from modelsv1 import Event, EventEquipment 
+# Make sure EventRequestStatus enum in modelsv1 includes CANCELLED
+from modelsv1 import Event, EventEquipment, EventRequestStatus as ModelEventRequestStatus # Import model enum too
 # Import authentication dependency
 from auth.auth_handler import get_current_active_user
 from dotenv import load_dotenv
@@ -60,7 +59,8 @@ else:
 
 # Define the router
 router = APIRouter(
-    prefix="/events"
+    prefix="/events",
+    tags=["Events"]
 )
 
 # === Helper Function for S3 Upload ===
@@ -90,7 +90,85 @@ async def upload_file_to_s3(file: UploadFile, bucket: str, org_id: str, event_na
         print(f"An unexpected error occurred during S3 upload: {e}")
         return None
 
-# === Endpoint to Submit an Event Request (Updated) ===
+# === Helper Function to Fetch and Format Equipment for Response ===
+async def _get_formatted_equipment_for_event(event_id: ObjectId, db: AsyncIOMotorDatabase) -> List[RequestedEquipmentItem]:
+    """Fetches linked equipment from DB and formats it for the response."""
+    equipment_list = []
+    equipment_cursor = db.event_equipment.find({"event_id": event_id})
+    async for eq_link in equipment_cursor:
+        try:
+            item = RequestedEquipmentItem(
+                equipment_id=str(eq_link["equipment_id"]),
+                quantity=eq_link["quantity"]
+            )
+            equipment_list.append(item)
+        except Exception as e:
+            print(f"Error formatting equipment link data for event {event_id}, link {eq_link.get('_id')}: {e}")
+            continue
+    return equipment_list
+
+# === Helper Function for Event Cleanup (Rejection/Cancellation) ===
+async def _perform_event_cleanup(event_id: ObjectId, event_doc: Dict[str, Any], db: AsyncIOMotorDatabase, delete_schedule: bool = True):
+    """
+    Performs cleanup tasks for a rejected or cancelled event.
+    Args:
+        event_id: The ObjectId of the event.
+        event_doc: The event document (fetched before status change).
+        db: The database instance.
+        delete_schedule: Whether to delete the associated schedule (True for Admin Cancel/Reject, False for Student Cancel of Pending).
+    """
+    print(f"Performing cleanup for event {event_id}...")
+    org_id = event_doc.get("organization_id")
+    schedule_id = event_doc.get("schedule_id")
+    s3_key = event_doc.get("request_document_key")
+
+    # 1. Remove event from organization's list
+    if org_id:
+        try:
+            await db.organizations.update_one(
+                {"_id": org_id},
+                {"$pull": {"events": event_id}}
+            )
+            print(f"Removed event {event_id} from organization {org_id}'s list.")
+        except Exception as org_pull_error:
+             print(f"Warning: Failed to remove event {event_id} from organization {org_id}: {org_pull_error}")
+    else:
+        print(f"Warning: Cannot remove event {event_id} from organization list: Organization ID missing from event.")
+
+    # 2. Delete associated schedule (if applicable)
+    if delete_schedule and schedule_id:
+        try:
+            await db.schedules.delete_one({"_id": schedule_id})
+            print(f"Deleted schedule {schedule_id} for event {event_id}")
+        except Exception as schedule_delete_error:
+            print(f"Warning: Failed to delete schedule {schedule_id} for event {event_id}: {schedule_delete_error}")
+
+    # 3. Delete linked equipment entries
+    try:
+        deleted_eq_count = await db.event_equipment.delete_many({"event_id": event_id})
+        print(f"Deleted {deleted_eq_count.deleted_count} equipment links for event {event_id}")
+    except Exception as eq_delete_error:
+        print(f"Warning: Failed to delete equipment links for event {event_id}: {eq_delete_error}")
+
+    # 4. Delete preferences
+    try:
+        deleted_pref_count = await db.preferences.delete_many({"event_id": event_id})
+        print(f"Deleted {deleted_pref_count.deleted_count} preferences for event {event_id}")
+    except Exception as pref_delete_error:
+        print(f"Warning: Failed to delete preferences for event {event_id}: {pref_delete_error}")
+
+    # 5. Delete S3 document if it exists
+    if s3_key and s3_client and S3_BUCKET_NAME:
+        try:
+            print(f"Deleting S3 object {s3_key} for event {event_id}")
+            s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        except ClientError as s3_error:
+            print(f"Warning: Failed to delete S3 object {s3_key}: {s3_error}")
+        except Exception as s3_gen_error:
+             print(f"Warning: Unexpected error deleting S3 object {s3_key}: {s3_gen_error}")
+
+
+# === Endpoint to Submit an Event Request ===
 @router.post(
     "/request",
     response_model=EventResponse,
@@ -103,24 +181,17 @@ async def submit_event_request(
     db: AsyncIOMotorDatabase = Depends(get_database),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """
-    Allows an authenticated student user to submit a new event request.
-    Requires sending data as `multipart/form-data`.
-
-    - **request_data**: A JSON string containing the event details 
-      (requested_date, requested_time_start, requested_time_end should be ISO 8601 datetime strings).
-    - **document**: An optional file (e.g., PDF, DOCX).
-    """
+    # ... (Authorization, Parsing, Duplicate Check, S3 Upload, Venue Validation logic remains the same) ...
     # --- Authorization and User Info Retrieval ---
     user_role = current_user.get("role")
     if user_role != UserRole.STUDENT.value:
         raise HTTPException(status_code=403, detail="Only students can submit event requests.")
 
-    user_org_id = current_user.get("organization") # ObjectId
+    user_org_id = current_user.get("organization") # Should be ObjectId from token/DB
     if not user_org_id or not isinstance(user_org_id, ObjectId):
          raise HTTPException(status_code=400, detail="Student user not associated with a valid organization.")
 
-    user_id = current_user.get("_id") # ObjectId
+    user_id = current_user.get("_id") # Should be ObjectId from token/DB
     if not user_id or not isinstance(user_id, ObjectId):
          raise HTTPException(status_code=500, detail="Could not identify requesting user.")
 
@@ -132,7 +203,6 @@ async def submit_event_request(
              raise json.JSONDecodeError("Missing closing '}' in JSON data.", cleaned_json_string, 0)
         json_to_parse = cleaned_json_string[:last_brace_index + 1]
         request_data_dict = json.loads(json_to_parse)
-        # Pydantic now expects datetime strings for date/time fields
         request_data = EventCreate.model_validate(request_data_dict)
         print("DEBUG: Successfully parsed and validated request_data")
 
@@ -143,43 +213,32 @@ async def submit_event_request(
         print(f"Error validating parsed JSON data: {validation_error}")
         raise HTTPException(status_code=422, detail=f"Invalid event request data structure: {validation_error}")
 
-    # --- ** ADD DUPLICATE CHECK HERE ** ---
+    # --- Duplicate Check ---
     try:
-        # Prepare date range for the check (start and end of the requested day in UTC)
-        # request_data.requested_date is already a datetime from validation
         requested_day_start_utc = datetime.combine(
             request_data.requested_date.date(), time.min, tzinfo=timezone.utc
         )
         requested_day_end_utc = requested_day_start_utc + timedelta(days=1)
 
-        # Define the query filter
         duplicate_check_filter = {
             "event_name": request_data.event_name,
-            "organization_id": user_org_id, # Use the ObjectId of the user's org
-            "requested_date": {
-                "$gte": requested_day_start_utc,
-                "$lt": requested_day_end_utc
-            },
-            # Optional: Add status check if you only want to prevent duplicates of PENDING/APPROVED events
-            # "approval_status": {"$ne": EventRequestStatus.REJECTED.value}
+            "organization_id": user_org_id,
+            "requested_date": { "$gte": requested_day_start_utc, "$lt": requested_day_end_utc },
+            # Prevent creating duplicates if one already exists and isn't rejected/cancelled
+            "approval_status": {"$nin": [EventRequestStatus.REJECTED.value, EventRequestStatus.CANCELLED.value]}
         }
-
         existing_event = await db.events.find_one(duplicate_check_filter)
-
         if existing_event:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"An event request named '{request_data.event_name}' already exists for this organization on {request_data.requested_date.date().isoformat()}."
+                detail=f"An active event request named '{request_data.event_name}' already exists for this organization on {request_data.requested_date.date().isoformat()}."
             )
         print("DEBUG: No duplicate event found.")
-
     except HTTPException as http_exc:
-         raise http_exc # Re-raise the 409 exception
+         raise http_exc
     except Exception as e:
          print(f"Error during duplicate event check: {e}")
-         # Decide if this should be a 500 error or allow proceeding
          raise HTTPException(status_code=500, detail="Error checking for duplicate events.")
-    # --- ** END DUPLICATE CHECK ** ---
 
     # --- Handle File Upload to S3 ---
     document_s3_key: Optional[str] = None
@@ -199,7 +258,7 @@ async def submit_event_request(
             venue_exists = await db.venues.find_one({"_id": ObjectId(request_data.requested_venue_id)}, {"_id": 1})
             if not venue_exists:
                  raise HTTPException(status_code=404, detail=f"Requested venue ID '{request_data.requested_venue_id}' not found.")
-            requested_venue_object_id = ObjectId(request_data.requested_venue_id) 
+            requested_venue_object_id = ObjectId(request_data.requested_venue_id)
         except InvalidId:
              raise HTTPException(status_code=422, detail=f"Invalid format for requested_venue_id: {request_data.requested_venue_id}")
         except Exception as e:
@@ -207,76 +266,63 @@ async def submit_event_request(
              raise HTTPException(status_code=500, detail="Error validating requested venue.")
 
     try:
-    # Ensure datetime objects are timezone-aware (UTC)
-    # Use the validated data directly from request_data (EventCreate instance)
         req_date_utc = request_data.requested_date
         if req_date_utc.tzinfo is None: req_date_utc = req_date_utc.replace(tzinfo=timezone.utc)
-
         start_time_utc = request_data.requested_time_start
         if start_time_utc.tzinfo is None: start_time_utc = start_time_utc.replace(tzinfo=timezone.utc)
-
         end_time_utc = request_data.requested_time_end
         if end_time_utc.tzinfo is None: end_time_utc = end_time_utc.replace(tzinfo=timezone.utc)
 
-        # --- CHANGE START ---
-        # Directly construct the dictionary for MongoDB insertion
-        # using the validated request_data and fetched ObjectIds
         event_dict_to_insert = {
             "event_name": request_data.event_name,
             "description": request_data.description,
-            "organization_id": user_org_id, # Use the actual ObjectId
-            "requesting_user_id": user_id,   # Use the actual ObjectId
+            "organization_id": user_org_id,
+            "requesting_user_id": user_id,
             "requires_funding": request_data.requires_funding,
             "estimated_attendees": request_data.estimated_attendees,
             "requested_date": req_date_utc,
             "requested_time_start": start_time_utc,
             "requested_time_end": end_time_utc,
-            "requested_venue_id": requested_venue_object_id, # Use the actual ObjectId (or None)
+            "requested_venue_id": requested_venue_object_id,
             "request_document_key": document_s3_key,
-            "approval_status": EventRequestStatus.PENDING.value, # Set default status explicitly
-            "created_at": datetime.now(timezone.utc)          # Set creation timestamp explicitly
-            # Add any other fields with default values needed for the DB document
+            "approval_status": EventRequestStatus.PENDING.value,
+            "created_at": datetime.now(timezone.utc)
         }
-    # --- CHANGE END ---
-
         print(f"DEBUG: Dictionary prepared for DB insertion: {event_dict_to_insert}")
 
-    # Convert date object (if present) to datetime object AFTER construction (if necessary - check types)
-    # This part might not be needed anymore if using datetimes directly
-    # if 'requested_date' in event_dict_to_insert and isinstance(event_dict_to_insert['requested_date'], date):
-    #     event_date = event_dict_to_insert['requested_date']
-    #     event_dict_to_insert['requested_date'] = datetime.combine(
-    #         event_date, time.min, tzinfo=timezone.utc
-    #     )
-    #     print(f"DEBUG: Converted requested_date to datetime for DB: {event_dict_to_insert['requested_date']}")
-
     except Exception as data_prep_error:
-        # Keep specific error handling if needed, but Pydantic error less likely here
         print(f"Error preparing data for DB insertion: {data_prep_error}")
         raise HTTPException(status_code=422, detail=f"Invalid event request data: {data_prep_error}")
 
     # --- Insert Event into DB ---
     inserted_event_id: Optional[ObjectId] = None
     try:
-        # Insert the dictionary (MongoDB will add _id)
         insert_result = await db.events.insert_one(event_dict_to_insert)
         inserted_event_id = insert_result.inserted_id
-        
-        # --- Handle Requested Equipment ---
-        if request_data.requested_equipment:
-            equipment_docs_to_insert = []
-            if not inserted_event_id or not isinstance(inserted_event_id, ObjectId):
-                 raise ValueError("Failed to get valid ObjectId after event insertion.")
-                 
-            event_id_str = str(inserted_event_id) 
+        if not inserted_event_id or not isinstance(inserted_event_id, ObjectId):
+             raise ValueError("Failed to get valid ObjectId after event insertion.")
 
+        # Link event to organization
+        try:
+            await db.organizations.update_one(
+                {"_id": user_org_id}, {"$addToSet": {"events": inserted_event_id}}
+            )
+            print(f"Successfully linked event {inserted_event_id} to organization {user_org_id}.")
+        except Exception as org_update_error:
+            print(f"Error updating organization {user_org_id} with event {inserted_event_id}: {org_update_error}")
+
+        # Handle Requested Equipment
+        if request_data.requested_equipment:
+            # ... (Equipment linking logic remains the same) ...
+            equipment_docs_to_insert = []
+            event_id_str = str(inserted_event_id)
             equipment_ids_to_validate = {item.equipment_id for item in request_data.requested_equipment}
             valid_equipment_object_ids = {}
             try:
                  object_ids = [ObjectId(eq_id) for eq_id in equipment_ids_to_validate]
                  cursor = db.equipment.find({"_id": {"$in": object_ids}}, {"_id": 1})
                  async for eq_doc in cursor:
-                     valid_equipment_object_ids[str(eq_doc["_id"])] = eq_doc["_id"] 
+                     valid_equipment_object_ids[str(eq_doc["_id"])] = eq_doc["_id"]
             except InvalidId as e:
                  if inserted_event_id: await db.events.delete_one({"_id": inserted_event_id})
                  raise HTTPException(status_code=422, detail=f"Invalid equipment ID format found in request: {e}")
@@ -289,90 +335,72 @@ async def submit_event_request(
                 if item.equipment_id not in valid_equipment_object_ids:
                      if inserted_event_id: await db.events.delete_one({"_id": inserted_event_id})
                      raise HTTPException(status_code=404, detail=f"Requested equipment ID '{item.equipment_id}' not found.")
-                
-                equipment_id_str = str(valid_equipment_object_ids[item.equipment_id])
 
-                # Create EventEquipment model instance using STRINGS for PyObjectId fields
                 event_equipment_data = EventEquipment(
-                    event_id=event_id_str, 
-                    equipment_id=equipment_id_str, 
+                    event_id=inserted_event_id,
+                    equipment_id=valid_equipment_object_ids[item.equipment_id],
                     quantity=item.quantity
                 )
-                # Dump EventEquipment model WITHOUT by_alias
-                equipment_docs_to_insert.append(event_equipment_data.model_dump()) 
+                equipment_docs_to_insert.append(event_equipment_data.model_dump(by_alias=True))
 
             if equipment_docs_to_insert:
-                # Insert the documents (MongoDB will add _id)
                 await db.event_equipment.insert_many(equipment_docs_to_insert)
                 print(f"Inserted {len(equipment_docs_to_insert)} equipment links for event {inserted_event_id}")
 
-        # --- Retrieve final document and Prepare Response ---
-        created_event_doc = await db.events.find_one({"_id": inserted_event_id}) 
+
+        # Retrieve final document and Prepare Response
+        created_event_doc = await db.events.find_one({"_id": inserted_event_id})
         if not created_event_doc:
              raise HTTPException(status_code=500, detail="Critical error: Failed to retrieve created event immediately after insertion.")
+        formatted_equipment = await _get_formatted_equipment_for_event(inserted_event_id, db)
 
-        # --- Explicitly build the response dictionary ---
+        # Build response dictionary
         response_data: Dict[str, Any] = {}
+        # ... (Logic to build response_data remains the same) ...
         for key, value in created_event_doc.items():
             if key == "_id":
-                # Map MongoDB '_id' to 'id' field in response schema
-                response_data["id"] = str(value) 
+                response_data["id"] = str(value)
             elif isinstance(value, ObjectId):
-                # Convert other ObjectIds to strings
                 response_data[key] = str(value)
             elif isinstance(value, (datetime, date, time)):
-                 # Let Pydantic handle datetime/date/time serialization via schema
                  response_data[key] = value
             elif key == "approval_status" and isinstance(value, str):
-                 # Ensure status matches the enum for validation
                  try:
                      response_data[key] = EventRequestStatus(value)
                  except ValueError:
-                      print(f"Warning: Invalid status '{value}' found in DB for event {response_data.get('id')}. Setting to PENDING.")
-                      response_data[key] = EventRequestStatus.PENDING # Default fallback
+                      response_data[key] = EventRequestStatus.PENDING
             else:
                  response_data[key] = value
-        
-        # Ensure all required fields for EventResponse are present before validation
-        # Example: Check for 'created_at' if it's mandatory in EventResponse
-        if "created_at" not in response_data:
-             print(f"Warning: 'created_at' missing from retrieved event doc {response_data.get('id')}")
-             # Handle appropriately - raise error or provide default if schema requires it
-             # response_data["created_at"] = datetime.now(timezone.utc) # Example default
+        response_data["requested_equipment"] = formatted_equipment
 
-        # Pass the explicitly prepared dictionary to EventResponse
         return EventResponse(**response_data)
 
     except Exception as e:
-        print(f"Error during event creation or equipment linking for user {user_id}: {e}")
-        if inserted_event_id and not await db.event_equipment.find_one({"event_id": inserted_event_id}):
-             print(f"Rolling back event creation due to equipment linking failure. Deleting event: {inserted_event_id}")
-             await db.events.delete_one({"_id": inserted_event_id}) 
-        elif inserted_event_id:
-             print(f"Potentially orphaned event document created with ID: {inserted_event_id}")
+        print(f"Error during event creation or linking for user {user_id}: {e}")
+        # Rollback logic
+        if inserted_event_id:
+            print(f"Attempting rollback. Deleting event: {inserted_event_id}")
+            await db.events.delete_one({"_id": inserted_event_id})
+            # Also remove from org list if linking succeeded
+            await db.organizations.update_one({"_id": user_org_id}, {"$pull": {"events": inserted_event_id}})
+            # Delete linked equipment
+            await db.event_equipment.delete_many({"event_id": inserted_event_id})
         raise HTTPException(status_code=500, detail=f"Failed to process event request due to an internal server error.")
+
 
 # === Endpoint to Submit Event Preferences ===
 @router.post(
-    "/preferences", # Changed path to be more RESTful
+    "/preferences",
     response_model=PreferenceResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Submit alternative preferences for an existing event request"
 )
 async def submit_event_preference(
-    preference_data: PreferenceCreate = Body(...), # Use Body for JSON payload
+    preference_data: PreferenceCreate = Body(...),
     db: AsyncIOMotorDatabase = Depends(get_database),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """
-    Allows an authenticated user (typically the event requester or from the same org)
-    to submit alternative scheduling preferences for an existing event request.
-
-    - **preference_data**: JSON body containing preference details linked by `event_id`.
-    """
-    # --- Input Validation (Handled by Pydantic via PreferenceCreate) ---
-
-    # --- Authorization and Event Validation ---
+    # ... (Existing preference submission logic remains the same) ...
     try:
         event_object_id = ObjectId(preference_data.event_id)
     except InvalidId:
@@ -388,7 +416,7 @@ async def submit_event_preference(
     if not user_org_id or user_org_id != event_org_id:
         raise HTTPException(status_code=403, detail="You are not authorized to add preferences for this event request.")
 
-    # --- Validate Preferred Venue (if provided) ---
+    # Validate Preferred Venue
     preferred_venue_object_id: Optional[ObjectId] = None
     if preference_data.preferred_venue_id:
         try:
@@ -398,27 +426,19 @@ async def submit_event_preference(
                  raise HTTPException(status_code=404, detail=f"Preferred venue ID '{preference_data.preferred_venue_id}' not found.")
         except InvalidId:
              raise HTTPException(status_code=422, detail=f"Invalid format for preferred_venue_id: {preference_data.preferred_venue_id}")
-        except HTTPException as http_exc:
-             raise http_exc
         except Exception as e:
-             print(f"Error checking preferred venue ID: {e}")
              raise HTTPException(status_code=500, detail="Error validating preferred venue.")
 
-    # --- Prepare Preference Data for DB ---
+    # Prepare Preference Data
     try:
         pref_date_utc: Optional[datetime] = None
         if preference_data.preferred_date:
-            pref_date_utc = datetime.combine(
-                preference_data.preferred_date, time.min, tzinfo=timezone.utc
-            )
+            pref_date_utc = datetime.combine(preference_data.preferred_date, time.min, tzinfo=timezone.utc)
 
         pref_start_time_utc = preference_data.preferred_time_slot_start
-        if pref_start_time_utc and pref_start_time_utc.tzinfo is None:
-            pref_start_time_utc = pref_start_time_utc.replace(tzinfo=timezone.utc)
-
+        if pref_start_time_utc and pref_start_time_utc.tzinfo is None: pref_start_time_utc = pref_start_time_utc.replace(tzinfo=timezone.utc)
         pref_end_time_utc = preference_data.preferred_time_slot_end
-        if pref_end_time_utc and pref_end_time_utc.tzinfo is None:
-            pref_end_time_utc = pref_end_time_utc.replace(tzinfo=timezone.utc)
+        if pref_end_time_utc and pref_end_time_utc.tzinfo is None: pref_end_time_utc = pref_end_time_utc.replace(tzinfo=timezone.utc)
 
         preference_dict_to_insert = {
             "event_id": event_object_id,
@@ -428,58 +448,34 @@ async def submit_event_preference(
             "preferred_time_slot_end": pref_end_time_utc,
             "created_at": datetime.now(timezone.utc)
         }
-        print(f"DEBUG: Preference dictionary prepared for DB: {preference_dict_to_insert}")
-
     except Exception as data_prep_error:
-        print(f"Error preparing preference data for DB insertion: {data_prep_error}")
         raise HTTPException(status_code=500, detail=f"Internal error preparing preference data.")
 
-
-    # --- Insert Preference into DB ---
+    # Insert Preference
     try:
         insert_result = await db.preferences.insert_one(preference_dict_to_insert)
         inserted_preference_id = insert_result.inserted_id
-
         created_preference_doc = await db.preferences.find_one({"_id": inserted_preference_id})
         if not created_preference_doc:
              raise HTTPException(status_code=500, detail="Critical error: Failed to retrieve created preference.")
 
-        # --- Prepare and Return Response ---
-        # --- FIX START: Manually convert ObjectIds to strings for response validation ---
+        # Prepare Response
         response_data_dict: Dict[str, Any] = {}
         for key, value in created_preference_doc.items():
-            if key == "_id":
-                # Map MongoDB '_id' (ObjectId) to 'id' (str) in response schema
-                response_data_dict["id"] = str(value)
-            elif isinstance(value, ObjectId):
-                # Convert other ObjectIds to strings
-                response_data_dict[key] = str(value)
-            elif isinstance(value, (datetime, date, time)):
-                 # Let Pydantic handle datetime/date/time serialization via schema's json_encoders
-                 response_data_dict[key] = value
-            else:
-                 response_data_dict[key] = value
-
-        # Ensure all required fields for PreferenceResponse are present if needed
-        # (e.g., if 'created_at' was mandatory in the schema)
-        # if "created_at" not in response_data_dict:
-        #      print(f"Warning: 'created_at' missing from retrieved preference doc {response_data_dict.get('id')}")
-             # Handle missing fields if necessary
-
-        # Pass the explicitly prepared dictionary with string IDs to PreferenceResponse
+            if key == "_id": response_data_dict["id"] = str(value)
+            elif isinstance(value, ObjectId): response_data_dict[key] = str(value)
+            else: response_data_dict[key] = value
         return PreferenceResponse(**response_data_dict)
-        # --- FIX END ---
     except Exception as e:
-        print(f"Error inserting preference into database: {e}")
-        # Consider if rollback is needed (not usually for simple inserts)
         raise HTTPException(status_code=500, detail="Failed to save event preference.")
+
 
 # === Endpoint to Update Event Request Status (Admin Only) ===
 @router.patch(
     "/{event_id}/status",
     response_model=EventResponse,
     status_code=status.HTTP_200_OK,
-    summary="Update status, add comment, create schedule on approval" # Updated summary
+    summary="Update status, add comment, create schedule on approval"
 )
 async def update_event_status(
     event_id: str = Path(..., description="The ID of the event request to update"),
@@ -487,22 +483,138 @@ async def update_event_status(
     db: AsyncIOMotorDatabase = Depends(get_database),
     current_user: dict = Depends(get_current_active_user)
 ):
-    """
-    Allows an administrator to update an event request status:
-    - Approve: Sets status to Approved, creates a schedule entry, links schedule ID to event.
-    - Reject: Sets status to Rejected (requires comment, performs cleanup).
-    - Needs Alternatives: Sets status to Needs Alternatives (requires comment, signals GA).
-
-    - **event_id**: ID of the target event request.
-    - **status_update**: JSON body containing `approval_status` and optional `admin_comment`.
-    """
-    # --- Authorization: Check if user is Admin ---
+    # ... (Authorization, ID Validation logic remains the same) ...
     user_role = current_user.get("role")
     if user_role != UserRole.ADMIN.value:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only administrators can update event request status."
-        )
+        raise HTTPException(status_code=403, detail="Only administrators can update event request status.")
+    try:
+        event_object_id = ObjectId(event_id)
+    except InvalidId:
+        raise HTTPException(status_code=422, detail=f"Invalid ObjectId format for event_id: {event_id}")
+
+    # Fetch event, including fields needed for cleanup/response
+    event_to_update = await db.events.find_one(
+        {"_id": event_object_id},
+        { # Projection
+            "approval_status": 1, "requested_venue_id": 1, "requested_time_start": 1,
+            "requested_time_end": 1, "request_document_key": 1, "admin_comment": 1,
+            "organization_id": 1, "event_name": 1, "description": 1,
+            "requesting_user_id": 1, "requires_funding": 1, "estimated_attendees": 1,
+            "requested_date": 1, "created_at": 1, "schedule_id": 1
+        }
+    )
+    if not event_to_update:
+        raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found.")
+
+    current_status = event_to_update.get("approval_status")
+    new_status_enum = status_update.approval_status
+    new_status_value = new_status_enum.value
+    admin_comment = status_update.admin_comment
+
+    if current_status == new_status_value:
+         raise HTTPException(status_code=400, detail=f"Event request is already in the '{new_status_value}' status.")
+    # Prevent changing status if already rejected or cancelled
+    if current_status in [EventRequestStatus.REJECTED.value, EventRequestStatus.CANCELLED.value]:
+         raise HTTPException(status_code=400, detail=f"Cannot change status of a {current_status} event.")
+
+    # --- Specific logic based on new status ---
+    perform_full_cleanup = False
+    new_schedule_id: Optional[ObjectId] = None
+    user_org_id = event_to_update.get("organization_id")
+
+    if new_status_enum == EventRequestStatus.APPROVED:
+        # ... (Schedule creation logic remains the same) ...
+        print(f"Event {event_id} set to APPROVED. Attempting to create schedule...")
+        admin_comment = None # Clear comment on approval
+        approved_venue_id = event_to_update.get("requested_venue_id")
+        approved_start_time = event_to_update.get("requested_time_start")
+        approved_end_time = event_to_update.get("requested_time_end")
+        if not approved_venue_id: raise HTTPException(status_code=400, detail="Cannot approve event: Requested venue ID is missing.")
+        if not approved_start_time or not approved_end_time: raise HTTPException(status_code=400, detail="Cannot approve event: Requested start or end time is missing.")
+        if not user_org_id: raise HTTPException(status_code=500, detail="Cannot create schedule: Event is missing organization ID.")
+        if approved_start_time.tzinfo is None: approved_start_time = approved_start_time.replace(tzinfo=timezone.utc)
+        if approved_end_time.tzinfo is None: approved_end_time = approved_end_time.replace(tzinfo=timezone.utc)
+        existing_schedule = await db.schedules.find_one({"event_id": event_object_id})
+        if existing_schedule:
+            new_schedule_id = existing_schedule["_id"]
+        else:
+            schedule_dict_to_insert = { "event_id": event_object_id, "venue_id": approved_venue_id, "organization_id": user_org_id, "scheduled_start_time": approved_start_time, "scheduled_end_time": approved_end_time, "is_optimized": False }
+            try:
+                insert_result = await db.schedules.insert_one(schedule_dict_to_insert)
+                new_schedule_id = insert_result.inserted_id
+            except Exception as e: raise HTTPException(status_code=500, detail="Failed to create schedule entry for approved event.")
+
+    elif new_status_enum == EventRequestStatus.REJECTED:
+        perform_full_cleanup = True
+        print(f"Event {event_id} set to REJECTED. Full cleanup will be performed.")
+
+    elif new_status_enum == EventRequestStatus.NEEDS_ALTERNATIVES:
+        # ... (Needs alternatives logic remains the same) ...
+        preference_exists = await db.preferences.find_one({"event_id": event_object_id}, {"_id": 1})
+        if not preference_exists: raise HTTPException(status_code=400, detail="Cannot set status to 'Needs Alternatives': No preferences submitted.")
+        if not admin_comment: print(f"Warning: Setting status to 'Needs Alternatives' for event {event_id} without an admin comment.")
+
+    # --- Prepare event update data ---
+    update_data = {"approval_status": new_status_value}
+    if admin_comment is not None: update_data["admin_comment"] = admin_comment
+    else: update_data["admin_comment"] = None
+    if new_schedule_id: update_data["schedule_id"] = new_schedule_id
+
+    # --- Update the event document ---
+    try:
+        update_result = await db.events.update_one({"_id": event_object_id}, {"$set": update_data})
+        if update_result.matched_count == 0: raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found during final update.")
+    except Exception as e: raise HTTPException(status_code=500, detail="Failed to finalize event update after status change.")
+
+    # --- Perform Cleanup if Rejected ---
+    if perform_full_cleanup:
+        await _perform_event_cleanup(event_object_id, event_to_update, db, delete_schedule=True)
+
+    # --- Retrieve final document and Prepare Response ---
+    updated_event_doc = await db.events.find_one({"_id": event_object_id})
+    if not updated_event_doc: raise HTTPException(status_code=500, detail="Failed to retrieve event after status update.")
+    formatted_equipment = await _get_formatted_equipment_for_event(event_object_id, db)
+    response_data_dict: Dict[str, Any] = {}
+    # ... (Logic to build response_data_dict remains the same) ...
+    for key in EventResponse.model_fields.keys():
+         if key == "id": response_data_dict["id"] = str(updated_event_doc.get("_id"))
+         elif key == "requested_equipment": response_data_dict[key] = formatted_equipment
+         elif key in updated_event_doc:
+             value = updated_event_doc[key]
+             if isinstance(value, ObjectId): response_data_dict[key] = str(value)
+             elif isinstance(value, datetime): response_data_dict[key] = value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+             elif key == "approval_status" and isinstance(value, str):
+                 try: response_data_dict[key] = EventRequestStatus(value)
+                 except ValueError: response_data_dict[key] = EventRequestStatus.PENDING
+             else: response_data_dict[key] = value
+         else: response_data_dict[key] = None
+    try:
+        return EventResponse(**response_data_dict)
+    except Exception as response_error:
+         print(f"Error creating response model for updated event {event_id}: {response_error}")
+         raise HTTPException(status_code=500, detail="Internal error preparing response after update.")
+
+
+# === NEW Endpoint: Student Cancel Pending Event ===
+@router.patch(
+    "/{event_id}/cancel-request",
+    status_code=status.HTTP_204_NO_CONTENT, # Return No Content on successful cancellation
+    summary="Cancel a pending event request (Students only)"
+)
+async def cancel_pending_event_request(
+    event_id: str = Path(..., description="The ID of the event request to cancel"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Allows the student who requested the event (or another student from the same org)
+    to cancel it, **only if it is currently in 'Pending' status**.
+    This performs cleanup (removes links, deletes preferences/files) but does NOT delete schedules.
+    """
+    # --- Authorization: Check if user is Student ---
+    user_role = current_user.get("role")
+    if user_role != UserRole.STUDENT.value:
+        raise HTTPException(status_code=403, detail="Only students can cancel event requests.")
 
     # --- Validate Event ID ---
     try:
@@ -510,175 +622,107 @@ async def update_event_status(
     except InvalidId:
         raise HTTPException(status_code=422, detail=f"Invalid ObjectId format for event_id: {event_id}")
 
-    # --- Find the event request ---
-    # Fetch necessary fields for potential schedule creation
-    event_to_update = await db.events.find_one(
+    # --- Find the event and verify ownership/status ---
+    event_to_cancel = await db.events.find_one(
         {"_id": event_object_id},
-        {"approval_status": 1, "requested_venue_id": 1, "requested_time_start": 1, "requested_time_end": 1, "request_document_key": 1, "admin_comment": 1}
-        )
-    if not event_to_update:
+        {"approval_status": 1, "organization_id": 1, "schedule_id": 1, "request_document_key": 1} # Fetch fields needed for checks/cleanup
+    )
+    if not event_to_cancel:
         raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found.")
 
-    # --- Get new status and comment ---
-    current_status = event_to_update.get("approval_status")
-    new_status_enum = status_update.approval_status
-    new_status_value = new_status_enum.value
-    admin_comment = status_update.admin_comment
+    # Check ownership (user belongs to the event's organization)
+    user_org_id = current_user.get("organization")
+    event_org_id = event_to_cancel.get("organization_id")
+    if not user_org_id or user_org_id != event_org_id:
+        raise HTTPException(status_code=403, detail="You are not authorized to cancel this event request.")
 
-    # --- Check if status is actually changing ---
-    if current_status == new_status_value:
-         raise HTTPException(
-             status_code=status.HTTP_400_BAD_REQUEST,
-             detail=f"Event request is already in the '{new_status_value}' status."
-         )
+    # Check if status is PENDING
+    current_status = event_to_cancel.get("approval_status")
+    if current_status != EventRequestStatus.PENDING.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot cancel event: Event status is '{current_status}', not 'Pending'."
+        )
 
-    # --- Specific logic based on new status ---
-    perform_cleanup = False
-    new_schedule_id: Optional[ObjectId] = None
-
-    if new_status_enum == EventRequestStatus.APPROVED:
-        print(f"Event {event_id} set to APPROVED. Attempting to create schedule...")
-        admin_comment = None # Clear comment on approval
-
-        # --- Create Schedule Entry ---
-        approved_venue_id = event_to_update.get("requested_venue_id")
-        approved_start_time = event_to_update.get("requested_time_start")
-        approved_end_time = event_to_update.get("requested_time_end")
-
-        # Validate necessary data for schedule
-        if not approved_venue_id:
-            # Cannot approve without a venue specified in the request
-            raise HTTPException(status_code=400, detail="Cannot approve event: Requested venue ID is missing.")
-        if not approved_start_time or not approved_end_time:
-             # Should not happen if EventCreate validation is correct, but check anyway
-             raise HTTPException(status_code=400, detail="Cannot approve event: Requested start or end time is missing.")
-
-        # Ensure times are timezone-aware (should be from initial request)
-        if approved_start_time.tzinfo is None: approved_start_time = approved_start_time.replace(tzinfo=timezone.utc)
-        if approved_end_time.tzinfo is None: approved_end_time = approved_end_time.replace(tzinfo=timezone.utc)
-
-        # Check for existing schedule for this event (prevent duplicates if re-approved somehow)
-        existing_schedule = await db.schedules.find_one({"event_id": event_object_id})
-        if existing_schedule:
-            print(f"Warning: Schedule already exists for approved event {event_id}. Using existing schedule ID.")
-            new_schedule_id = existing_schedule["_id"]
-        else:
-            # Prepare schedule document
-            schedule_dict_to_insert = {
-                "event_id": event_object_id,
-                "venue_id": approved_venue_id, # Already ObjectId from event doc
-                "scheduled_start_time": approved_start_time, # Already datetime from event doc
-                "scheduled_end_time": approved_end_time,     # Already datetime from event doc
-            }
-            try:
-                insert_result = await db.schedules.insert_one(schedule_dict_to_insert)
-                new_schedule_id = insert_result.inserted_id
-                print(f"Successfully created schedule entry {new_schedule_id} for event {event_id}.")
-            except Exception as e:
-                print(f"Error creating schedule entry for approved event {event_id}: {e}")
-                # Critical error: Event status might be updated, but schedule failed.
-                # Consider how to handle this inconsistency (e.g., revert status update or log for manual fix)
-                raise HTTPException(status_code=500, detail="Failed to create schedule entry for approved event.")
-
-    elif new_status_enum == EventRequestStatus.REJECTED:
-        perform_cleanup = True
-        print(f"Event {event_id} set to REJECTED. Cleanup will be performed.")
-
-    elif new_status_enum == EventRequestStatus.NEEDS_ALTERNATIVES:
-        preference_exists = await db.preferences.find_one({"event_id": event_object_id}, {"_id": 1})
-        if not preference_exists:
-             raise HTTPException(
-                 status_code=status.HTTP_400_BAD_REQUEST,
-                 detail="Cannot set status to 'Needs Alternatives': No preferences submitted."
-             )
-        if not admin_comment:
-             print(f"Warning: Setting status to 'Needs Alternatives' for event {event_id} without an admin comment.")
-        print(f"Event {event_id} set to NEEDS_ALTERNATIVES. No cleanup performed.")
-
-    # --- Prepare event update data ---
-    update_data = {"approval_status": new_status_value}
-    if admin_comment is not None:
-        update_data["admin_comment"] = admin_comment
-    else:
-        # Ensure comment is nullified if not provided or cleared during approval
-        update_data["admin_comment"] = None
-
-    # Add schedule_id if created
-    if new_schedule_id:
-        update_data["schedule_id"] = new_schedule_id
-
-    # --- Update the event document in the database ---
+    # --- Update Event Status to Cancelled ---
     try:
         update_result = await db.events.update_one(
             {"_id": event_object_id},
-            {"$set": update_data}
+            {"$set": {"approval_status": EventRequestStatus.CANCELLED.value}}
         )
         if update_result.matched_count == 0:
-            # This case should be rare if find_one succeeded earlier
-            raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found during final update.")
-
+            # Should not happen if find_one succeeded, but safety check
+            raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found during cancellation update.")
+        print(f"Event {event_id} status updated to Cancelled by student.")
     except Exception as e:
-        print(f"Error performing final update on event {event_id}: {e}")
-        # If schedule creation succeeded but this fails, there's an inconsistency.
-        raise HTTPException(status_code=500, detail="Failed to finalize event update after status change.")
+        print(f"Error updating event {event_id} status to Cancelled: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update event status during cancellation.")
 
-    # --- Perform Cleanup only if explicitly Rejected ---
-    if perform_cleanup:
-        # ... (Cleanup logic for equipment and S3 as before) ...
-        pass # Placeholder for brevity
+    # --- Perform Cleanup (No Schedule Deletion for Student Cancel) ---
+    await _perform_event_cleanup(event_object_id, event_to_cancel, db, delete_schedule=False)
 
-    # --- Retrieve the fully updated document for response ---
-    # Need to fetch the full doc now for the EventResponse model
-    updated_event_doc = await db.events.find_one({"_id": event_object_id})
-    if not updated_event_doc:
-         raise HTTPException(status_code=500, detail="Failed to retrieve event after status update and potential cleanup.")
-
-    # --- Prepare and Return Response ---
-    # (Response preparation logic converting ObjectIds etc. remains the same)
-    response_data_dict: Dict[str, Any] = {}
-    for key, value in updated_event_doc.items():
-        if key == "_id":
-            response_data_dict["id"] = str(value)
-        elif key == "schedule_id" and isinstance(value, ObjectId): # Handle schedule_id
-             response_data_dict[key] = str(value)
-        elif key == "admin_comment":
-             response_data_dict[key] = value
-        elif isinstance(value, ObjectId):
-            response_data_dict[key] = str(value)
-        elif isinstance(value, datetime):
-             if value.tzinfo is None:
-                 response_data_dict[key] = value.replace(tzinfo=timezone.utc)
-             else:
-                 response_data_dict[key] = value.astimezone(timezone.utc)
-        elif isinstance(value, (date, time)):
-             response_data_dict[key] = value
-        elif key == "approval_status" and isinstance(value, str):
-             try:
-                 response_data_dict[key] = EventRequestStatus(value)
-             except ValueError:
-                  print(f"Warning: Invalid status '{value}' found in DB for event {response_data_dict.get('id')} after update. Defaulting.")
-                  response_data_dict[key] = EventRequestStatus.PENDING
-        else:
-            response_data_dict[key] = value
-
-    # Ensure optional fields exist for validation
-    if "admin_comment" not in response_data_dict:
-         response_data_dict["admin_comment"] = None
-    if "schedule_id" not in response_data_dict:
-         response_data_dict["schedule_id"] = None
-    # Ensure requested_venue_id is present if needed by EventResponse
-    if "requested_venue_id" not in response_data_dict:
-         venue_id_val = event_to_update.get("requested_venue_id") # Get from initial fetch
-         response_data_dict["requested_venue_id"] = str(venue_id_val) if venue_id_val else None
-    # Add other fields required by EventResponse if not fetched initially
+    # --- Return No Content ---
+    return None # FastAPI handles the 204 response
 
 
+# === NEW Endpoint: Admin Cancel Any Event ===
+@router.patch(
+    "/{event_id}/admin-cancel",
+    status_code=status.HTTP_204_NO_CONTENT, # Return No Content on successful cancellation
+    summary="Cancel any event request (Admins only)"
+)
+async def admin_cancel_event_request(
+    event_id: str = Path(..., description="The ID of the event request to cancel"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: dict = Depends(get_current_active_user)
+):
+    """
+    Allows an administrator to cancel any event request, regardless of its current status.
+    This performs full cleanup including deleting any associated schedule.
+    """
+    # --- Authorization: Check if user is Admin ---
+    user_role = current_user.get("role")
+    if user_role != UserRole.ADMIN.value:
+        raise HTTPException(status_code=403, detail="Only administrators can cancel event requests.")
+
+    # --- Validate Event ID ---
     try:
-        # Make sure EventResponse schema includes schedule_id: Optional[str]
-        return EventResponse(**response_data_dict)
-    except Exception as response_error:
-         print(f"Error creating response model for updated event {event_id}: {response_error}")
-         # Check EventResponse schema includes all fields in response_data_dict
-         raise HTTPException(status_code=500, detail="Internal error preparing response after update.")
+        event_object_id = ObjectId(event_id)
+    except InvalidId:
+        raise HTTPException(status_code=422, detail=f"Invalid ObjectId format for event_id: {event_id}")
 
-# --- Add other event-related endpoints below ---
+    # --- Find the event ---
+    # Fetch fields needed for cleanup
+    event_to_cancel = await db.events.find_one(
+        {"_id": event_object_id},
+        {"approval_status": 1, "organization_id": 1, "schedule_id": 1, "request_document_key": 1}
+    )
+    if not event_to_cancel:
+        raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found.")
+
+    # Check if already cancelled to avoid redundant operations
+    current_status = event_to_cancel.get("approval_status")
+    if current_status == EventRequestStatus.CANCELLED.value:
+         print(f"Event {event_id} is already cancelled.")
+         return None # Return 204 as it's already in the desired state
+
+    # --- Update Event Status to Cancelled ---
+    try:
+        update_result = await db.events.update_one(
+            {"_id": event_object_id},
+            {"$set": {"approval_status": EventRequestStatus.CANCELLED.value}}
+        )
+        if update_result.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"Event request with ID '{event_id}' not found during cancellation update.")
+        print(f"Event {event_id} status updated to Cancelled by admin.")
+    except Exception as e:
+        print(f"Error updating event {event_id} status to Cancelled: {e}")
+        # Don't raise yet, proceed to cleanup if possible
+        pass # Logged the error, cleanup might still work
+
+    # --- Perform Full Cleanup (Including Schedule Deletion) ---
+    await _perform_event_cleanup(event_object_id, event_to_cancel, db, delete_schedule=True)
+
+    # --- Return No Content ---
+    return None # FastAPI handles the 204 response
+

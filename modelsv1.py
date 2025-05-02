@@ -123,11 +123,11 @@ class Schedule(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     event_id: PyObjectId # Link back to the event
     venue_id: PyObjectId # The venue where it's scheduled
+    organization_id: Optional[PyObjectId] = None # <-- ADDED: Link to the organization
     scheduled_start_time: datetime # Combined date and start time
     scheduled_end_time: datetime   # Combined date and end time
-    # scheduled_date: date # Removed, redundant if using datetime
-    # scheduled_time_start: time # Removed
-    # scheduled_time_end: time # Removed
+    # Optional: Add a field to distinguish optimized schedules if stored in the same collection
+    is_optimized: bool = Field(default=False) # <-- ADDED: Flag for GA results
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
@@ -140,19 +140,22 @@ class ScheduleCreateInternal(BaseModel):
     """Model for creating a schedule internally."""
     event_id: PyObjectId
     venue_id: PyObjectId
+    organization_id: Optional[PyObjectId] = None # <-- ADDED
     scheduled_start_time: datetime
     scheduled_end_time: datetime
+    is_optimized: bool = False # <-- ADDED
 
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         json_encoders={ObjectId: str}
     )
-
+    
 class EventRequestStatus(str, Enum):
     PENDING = "Pending"
     APPROVED = "Approved"
     REJECTED = "Rejected"
     NEEDS_ALTERNATIVES = "Needs_Alternatives"
+    CANCELLED = "Cancelled"
 
 # --- Updated Event Model ---
 class Event(BaseModel):

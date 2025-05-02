@@ -51,20 +51,4 @@ async def read_users_me(current_user: dict = Depends(get_current_active_user)): 
     # Directly return the dictionary. FastAPI will validate it against UserResponse.
     return response_data
 
-# Note: If get_current_active_user returns a Pydantic User model instance (`current_user: User`),
-# you would use attribute access instead:
-# async def read_users_me(current_user: User = Depends(get_current_active_user)):
-#     response_data = {
-#         "id": str(current_user.id), # Assuming 'id' is the field name in the User model
-#         "email": current_user.email,
-#         "role": current_user.role,
-#         "is_active": current_user.is_active,
-#         "organization": str(current_user.organization_id) if current_user.organization_id else None, # Convert ObjectId from model
-#         "department": current_user.department,
-#     }
-#     # Filter based on role before returning
-#     if current_user.role == UserRole.STUDENT:
-#         response_data.pop("department", None)
-#     elif current_user.role == UserRole.ADMIN:
-#          response_data.pop("organization", None)
-#     return response_data
+

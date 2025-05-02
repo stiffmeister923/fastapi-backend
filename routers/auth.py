@@ -109,11 +109,6 @@ async def register_user(user: UserCreate, db = Depends(get_database)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-
-
-
-        
-
 @router.post("/token", response_model=Token)
 async def login_for_access_token(
     credentials: UserCredentials,

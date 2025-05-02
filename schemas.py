@@ -7,7 +7,7 @@ from pydantic import ( # Group imports from the same library
     FieldValidationInfo # Import FieldValidationInfo here
 )
 from typing import List, Optional, Any
-from datetime import date, time, datetime
+from datetime import date, time, datetime, timezone
 from enum import Enum
 from bson import ObjectId
 import os # Import os to access environment variables
@@ -216,11 +216,12 @@ class OrganizationResponse(BaseModel):
 # Helper needed for the cross-field validator in UserCreate
 from pydantic import FieldValidationInfo # Import at top if not already there
 
-
-# --- Updated Schedule Schemas ---
+ #--- Updated Schedule Schemas ---
 class ScheduleBase(BaseModel):
     """Base schema for schedule properties."""
     venue_id: str = Field(..., description="ID of the scheduled venue")
+    # ADD organization_id here for clarity in response/base
+    organization_id: Optional[str] = Field(None, description="ID of the associated organization")
     scheduled_start_time: datetime = Field(..., description="Scheduled start date and time (ISO 8601 format)")
     scheduled_end_time: datetime = Field(..., description="Scheduled end date and time (ISO 8601 format)")
     # event_id is usually not needed for creation via API, but added in response
@@ -234,24 +235,36 @@ class ScheduleBase(BaseModel):
             raise ValueError("Scheduled end time must be after scheduled start time")
         return v
 
+    # Add validation for organization_id format if provided and needed
+    @field_validator("organization_id")
+    @classmethod
+    def validate_org_id_format(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format for organization_id: {v}")
+        return v
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
          json_encoders={ # Ensure consistent serialization for examples/input
             ObjectId: str,
             datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
         }
-        )
+    )
 
 class ScheduleCreate(ScheduleBase):
     """Schema for creating a schedule (potentially via a dedicated endpoint, though not used here)."""
     # Usually linked to an event, so event_id might be needed depending on API design
     # event_id: str = Field(..., description="ID of the event being scheduled")
-    pass
+    pass # Inherits fields from ScheduleBase
 
 class ScheduleResponse(ScheduleBase):
     """Schema for returning schedule data in API responses."""
     id: str = Field(..., alias="_id", description="Unique ID of the schedule entry")
     event_id: str = Field(..., description="ID of the associated event") # Add event_id to response
+    # organization_id is inherited from ScheduleBase
+    # Add is_optimized flag to response if needed for frontend logic
+    is_optimized: bool = Field(default=False, description="Indicates if this schedule is from the optimizer")
+
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -262,12 +275,15 @@ class ScheduleResponse(ScheduleBase):
             # date: lambda d: d.isoformat() if isinstance(d, date) else None # Keep if date objects are used elsewhere
         },
         json_schema_extra={
+            # --- UPDATED EXAMPLE ---
             "example": {
                 "_id": "681a0b1c2d3e4f5a6b7c8d9e",
                 "event_id": "6812e9c94c795e2a0717f49d",
                 "venue_id": "68129f0c6d0bee76fee415e8",
+                "organization_id": "60d5ec9af682dbd12a0a9fb8", # Example Org ID
                 "scheduled_start_time": "2025-11-28T13:00:00Z",
-                "scheduled_end_time": "2025-11-28T17:00:00Z"
+                "scheduled_end_time": "2025-11-28T17:00:00Z",
+                "is_optimized": False
             }
         }
         )
@@ -275,9 +291,18 @@ class ScheduleResponse(ScheduleBase):
 class ScheduleUpdate(BaseModel):
     """Schema for updating a schedule (optional fields)."""
     venue_id: Optional[str] = None
+    organization_id: Optional[str] = None # <-- ADDED
     scheduled_start_time: Optional[datetime] = None
     scheduled_end_time: Optional[datetime] = None
-    # Add validator if needed
+    is_optimized: Optional[bool] = None # <-- ADDED
+
+    # Add validation for organization_id format if provided
+    @field_validator("organization_id")
+    @classmethod
+    def validate_org_id_format_update(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format for organization_id: {v}")
+        return v
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -286,6 +311,7 @@ class EventRequestStatus(str, Enum):
     APPROVED = "Approved"
     REJECTED = "Rejected"
     NEEDS_ALTERNATIVES = "Needs_Alternatives"
+    CANCELLED = "Cancelled"
 
 
 # --- Add this Schema for Requested Equipment ---
@@ -351,6 +377,19 @@ class EventCreate(EventBase):
         }
     )
 
+class RequestedEquipmentItem(BaseModel):
+    """Schema for an item in the list of requested equipment."""
+    equipment_id: str = Field(..., description="ID of the requested equipment item")
+    quantity: int = Field(..., gt=0, description="Quantity of the equipment item needed") # Ensure quantity is positive
+
+    # Add validation for equipment_id format if desired
+    @field_validator("equipment_id")
+    @classmethod
+    def validate_equipment_id(cls, v: str) -> str:
+        if not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format for equipment_id: {v}")
+        return v
+
 class EventResponse(EventBase):
     """Schema for returning event data in API responses."""
     id: str = Field(..., alias="_id", description="Unique ID of the event request")
@@ -363,7 +402,7 @@ class EventResponse(EventBase):
     # Add requested venue/equipment if needed in response
     requested_venue_id: Optional[str] = None 
     # Note: Displaying requested equipment might require another query or embedding
-    requested_equipment: Optional[List[...]] = None # Decide if needed
+    requested_equipment: Optional[List[RequestedEquipmentItem]] = None # Decide if needed
     created_at: datetime = Field(..., description="Timestamp when the request was created")
 
 

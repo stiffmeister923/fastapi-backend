@@ -8,7 +8,8 @@ from routers import (
     events, 
     venue, 
     equipment,
-    events )# Import equipment
+    events,
+    schedule )# Import equipment
 
 import os
 from dotenv import load_dotenv
@@ -44,3 +45,4 @@ app.include_router(org.router)
 app.include_router(venue.router)
 app.include_router(equipment.router)
 app.include_router(events.router)
+app.include_router(schedule.router)
