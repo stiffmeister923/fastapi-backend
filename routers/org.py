@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any # Added Dict, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, time
 
 from database import get_database
 # Import models and schemas
@@ -14,10 +14,14 @@ from schemas import (
     OrganizationCreate,
     OrganizationResponse,
     OrganizationUpdate,
+    OrganizationDetailResponse, # Import the new response model
     UserResponse,
-    UserRole
+    EventResponse,
+    UserRole,
+    EventRequestStatus,
+    RequestedEquipmentItem # Needed for populating EventResponse
 )
-from auth.auth_handler import get_current_active_user
+from auth.auth_handler import get_current_active_user, require_admin # Import auth if needed
 
 router = APIRouter(prefix="/org", tags=["Organizations"])
 
@@ -136,7 +140,135 @@ async def create_organization(
         print(f"Error during organization creation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create organization due to an internal error.")
 
+@router.get(
+    "/details/{org_id}", # New endpoint path
+    response_model=OrganizationDetailResponse, # Use the new response model
+    summary="Get Organization Details with Populated Members and Events",
+    # dependencies=[Depends(get_current_active_user)] # Add dependency if only authenticated users can access
+)
+async def get_organization_details_with_members_and_events(
+    org_id: str = Path(..., description="The MongoDB ObjectId of the organization"),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+    # current_user: dict = Depends(get_current_active_user) # Inject if needed for auth checks
+):
+    """
+    Retrieves the details of a specific organization, including the full
+    details of its members and associated event requests.
+    """
+    try:
+        org_object_id = ObjectId(org_id)
+    except InvalidId:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid ID format: {org_id}")
 
+    # 1. Fetch the main organization document
+    organization_doc = await db.organizations.find_one({"_id": org_object_id})
+    if organization_doc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Organization with ID {org_id} not found")
+
+    member_ids = organization_doc.get("members", []) # List of ObjectIds
+    event_ids = organization_doc.get("events", [])   # List of ObjectIds
+
+    # 2. Fetch Detailed Member Data
+    populated_members: List[UserResponse] = []
+    if member_ids:
+        member_cursor = db.users.find({"_id": {"$in": member_ids}})
+        async for user_doc in member_cursor:
+            try:
+                # Prepare data for UserResponse, converting ObjectIds as needed
+                user_response_data = {
+                    "id": str(user_doc["_id"]),
+                    "email": user_doc.get("email"),
+                    "role": user_doc.get("role"),
+                    "is_active": user_doc.get("is_active", False),
+                    # Ensure organization is string or None
+                    "organization": str(user_doc.get("organization")) if user_doc.get("organization") else None,
+                    "department": user_doc.get("department")
+                }
+                # Exclude fields based on role for consistency if desired
+                if user_response_data["role"] == UserRole.STUDENT.value:
+                     user_response_data["department"] = None
+                elif user_response_data["role"] == UserRole.ADMIN.value:
+                     user_response_data["organization"] = None
+
+                populated_members.append(UserResponse(**user_response_data))
+            except Exception as e:
+                # Log error and potentially skip this member
+                print(f"Warning: Error processing member {user_doc.get('_id')} for org details: {e}")
+                continue
+
+    # 3. Fetch Detailed Event Data
+    populated_events: List[EventResponse] = []
+    if event_ids:
+        event_cursor = db.events.find({"_id": {"$in": event_ids}})
+        async for event_doc in event_cursor:
+            try:
+                # --- Populate Event Data (adapting logic from events.py) ---
+
+                # Fetch related equipment for this event
+                formatted_equipment: List[RequestedEquipmentItem] = []
+                eq_cursor = db.event_equipment.find({"event_id": event_doc["_id"]})
+                async for eq_link in eq_cursor:
+                    try:
+                        formatted_equipment.append(RequestedEquipmentItem(
+                            equipment_id=str(eq_link["equipment_id"]),
+                            quantity=eq_link["quantity"]
+                        ))
+                    except Exception as eq_err:
+                         print(f"Warning: Error processing equipment link for event {event_doc.get('_id')}: {eq_err}")
+
+                # Prepare data for EventResponse, converting ObjectIds and handling enums/dates
+                event_response_data = {}
+                for key, value in event_doc.items():
+                    if key == "_id":
+                        event_response_data["id"] = str(value)
+                    elif key in ["organization_id", "requesting_user_id", "requested_venue_id", "schedule_id"] and isinstance(value, ObjectId):
+                         event_response_data[key] = str(value)
+                    elif isinstance(value, datetime): # Ensure datetime is timezone-aware (e.g., UTC)
+                        event_response_data[key] = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+                    elif isinstance(value, (date, time)): # Handle date/time if present
+                         event_response_data[key] = value
+                    elif key == "approval_status":
+                         # Safely convert status string to enum
+                         try:
+                             event_response_data[key] = EventRequestStatus(value) if value else EventRequestStatus.PENDING
+                         except ValueError:
+                              print(f"Warning: Invalid approval_status '{value}' for event {event_doc.get('_id')}. Defaulting to PENDING.")
+                              event_response_data[key] = EventRequestStatus.PENDING
+                    else:
+                         event_response_data[key] = value # Copy other fields
+
+                event_response_data["requested_equipment"] = formatted_equipment
+
+                # Ensure all fields expected by EventResponse schema are present
+                for field_name in EventResponse.model_fields:
+                    if field_name not in event_response_data and field_name != 'id':
+                        # Check if the field is Optional in the schema, otherwise raise error or provide default
+                        # Assuming optional fields can default to None here
+                        event_response_data[field_name] = None
+
+                populated_events.append(EventResponse(**event_response_data))
+            except Exception as e:
+                # Log error and potentially skip this event
+                print(f"Warning: Error processing event {event_doc.get('_id')} for org details: {e}")
+                continue
+
+    # 4. Construct the final response object using the main org doc and populated lists
+    # We create a dictionary first that matches the OrganizationDetailResponse fields
+    # Pydantic will use the alias "_id" to populate the "id" field in the model
+    final_response_data = {
+        "_id": str(organization_doc["_id"]),
+        "name": organization_doc.get("name"),
+        "description": organization_doc.get("description"),
+        "faculty_advisor_email": organization_doc.get("faculty_advisor_email"),
+        "department": organization_doc.get("department"),
+        "created_at": organization_doc.get("created_at"),
+        "updated_at": organization_doc.get("updated_at"),
+        "members": populated_members, # Assign the list of UserResponse models
+        "events": populated_events     # Assign the list of EventResponse models
+    }
+
+    # FastAPI will automatically validate final_response_data against OrganizationDetailResponse
+    return final_response_data
 # --- API Endpoint (List Organizations) ---
 @router.get(
     "/list",

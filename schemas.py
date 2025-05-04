@@ -145,6 +145,8 @@ class UserResponse(BaseModel):
     )
 
 # --- Organization Schemas ---
+
+
 class OrganizationBase(BaseModel):
     """Base schema for organization properties."""
     name: str
@@ -308,46 +310,6 @@ class ScheduleUpdate(BaseModel):
         return v
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-class ScheduleEventInfoRequestItem(BaseModel):
-    """Schema for each item in the request body for the event name endpoint."""
-    # Include all fields from the user's example request
-    venue_id: str
-    organization_id: str
-    scheduled_start_time: datetime
-    scheduled_end_time: datetime
-    _id: str # Assuming this is the schedule ID
-    event_id: str
-    is_optimized: bool
-
-    # Add validators for ID formats
-    @field_validator("venue_id", "organization_id", "_id", "event_id")
-    @classmethod
-    def validate_objectid_format(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not ObjectId.is_valid(v):
-            raise ValueError(f"Invalid ObjectId format: {v}")
-        return v
-
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        json_encoders={
-            ObjectId: str,
-            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
-        }
-    )
-
-class ScheduleEventInfoResponseItem(ScheduleEventInfoRequestItem):
-    """Schema for each item in the response body, adding the event name."""
-    event_name: Optional[str] = Field(None, description="Name of the associated event")
-
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        json_encoders={
-            ObjectId: str,
-            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
-        }
-    )
-# --- END NEW Schemas ---
 
 class EventRequestStatus(str, Enum):
     PENDING = "Pending"
@@ -654,3 +616,28 @@ class EventEquipmentUpdate(BaseModel):
     quantity: Optional[int] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True) 
+
+
+class OrganizationDetailResponse(BaseModel):
+    """
+    Response model for organization details including populated
+    member and event information.
+    """
+    # Use Field alias to map 'id' from '_id' in the MongoDB document
+    id: str = Field(..., alias="_id")
+    name: str
+    description: Optional[str] = None
+    faculty_advisor_email: Optional[str] = None
+    department: Optional[str] = None # Assuming department is part of the org doc
+    members: List[UserResponse] = [] # Changed: List of full UserResponse objects
+    events: List[EventResponse] = []   # Changed: List of full EventResponse objects
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        populate_by_name = True # Allows using alias like "_id" -> "id"
+        arbitrary_types_allowed = True # Might be needed for ObjectId if not handled by FastAPI/Pydantic V2
+        json_encoders = {
+            ObjectId: str # Ensure ObjectIds are converted to strings in the final JSON
+        }
+        
