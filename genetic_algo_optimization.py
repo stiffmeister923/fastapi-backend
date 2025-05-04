@@ -787,7 +787,7 @@ def calculate_fitness(chromosome: Chromosome, ga_data: Dict[str, Any], weights: 
             if end_time > next_day_6am: current_event_violations += 1 # Night Curfew End (Past 6am next day)
             end_time_naive = end_time.time().replace(tzinfo=None)
             if time(22, 0) < end_time_naive or (end_time_naive <= time(6, 0) and end_time.date() > start_time.date()):
-                 if end_time_naive != time(0,0): current_event_violations += 1 # Night Curfew End (Before midnight but after 10pm)
+                 current_event_violations += 1 # Night Curfew End (Before midnight but after 10pm)
         except TypeError as e:
              print(f"***** ERROR: TIME BOUNDS CHECK Type Error for Event {event_id_str} *****")
              print(f"***** Comparing {start_time} ({type(start_time)}) and {end_time} ({type(end_time)}) *****")
