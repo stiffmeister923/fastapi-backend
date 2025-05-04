@@ -641,3 +641,7 @@ class OrganizationDetailResponse(BaseModel):
             ObjectId: str # Ensure ObjectIds are converted to strings in the final JSON
         }
         
+
+class EventDocumentUrlResponse(BaseModel):
+    """Response model containing the pre-signed S3 URL for an event document."""
+    document_url: str = Field(..., description="A temporary URL to download the event document.")        

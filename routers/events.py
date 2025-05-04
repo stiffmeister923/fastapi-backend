@@ -16,6 +16,7 @@ from database import get_database
 # --- Import Schemas ---
 # Make sure EventRequestStatus enum in schemas includes CANCELLED
 from schemas import (
+    EventDocumentUrlResponse,
     EventCreate,
     EventResponse,
     UserResponse,
@@ -62,7 +63,18 @@ router = APIRouter(
     prefix="/events",
     tags=["Events"]
 )
-
+async def require_admin(current_user: UserResponse = Depends(get_current_active_user)):
+    """
+    Dependency that raises an HTTPException if the current user is not an admin.
+    Assumes get_current_active_user returns a dict-like object.
+    """
+    user_role = current_user.get("role")
+    if not user_role or user_role != UserRole.ADMIN.value: # Compare with enum's value
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. Admin privileges required."
+        )
+    return current_user
 # === Helper Function for S3 Upload ===
 async def upload_file_to_s3(file: UploadFile, bucket: str, org_id: str, event_name: str) -> Optional[str]:
     """Uploads a file to S3 and returns the object key, or None if upload fails."""
@@ -123,18 +135,22 @@ async def _perform_event_cleanup(event_id: ObjectId, event_doc: Dict[str, Any], 
     s3_key = event_doc.get("request_document_key")
 
     # 1. Remove event from organization's list
-    if org_id:
-        try:
-            await db.organizations.update_one(
-                {"_id": org_id},
-                {"$pull": {"events": event_id}}
-            )
-            print(f"Removed event {event_id} from organization {org_id}'s list.")
-        except Exception as org_pull_error:
-             print(f"Warning: Failed to remove event {event_id} from organization {org_id}: {org_pull_error}")
-    else:
-        print(f"Warning: Cannot remove event {event_id} from organization list: Organization ID missing from event.")
-
+# --- MODIFICATION START ---
+    # 1. KEEP the event linked to the organization. Do NOT pull the event_id.
+    # if org_id: # Check if org_id exists before trying to update
+    #     try:
+    #         # COMMENTED OUT / REMOVED: This line removed the link.
+    #         # await db.organizations.update_one(
+    #         #     {"_id": org_id},
+    #         #     {"$pull": {"events": event_id}}
+    #         # )
+    #         # print(f"Removed event {event_id} from organization {org_id}'s list.")
+    #         print(f"Keeping event {event_id} linked to organization {org_id} for history.")
+    #     except Exception as org_pull_error:
+    #          print(f"Warning: Error during (skipped) removal of event {event_id} from organization {org_id}: {org_pull_error}")
+    # else:
+    #     print(f"Warning: Cannot modify organization list for event {event_id}: Organization ID missing from event.")
+    # --- MODIFICATION END ---
     # 2. Delete associated schedule (if applicable)
     if delete_schedule and schedule_id:
         try:
@@ -232,6 +248,74 @@ async def list_pending_event_requests(
         raise HTTPException(status_code=500, detail="Failed to retrieve pending event requests.")
 
     return pending_events
+
+# === Endpoint to Get Event Document Download URL (Admin Only) ===
+@router.get(
+    "/{event_id}/document_url",
+    response_model=EventDocumentUrlResponse, # Use the new response model
+    summary="Get a temporary download URL for the event's document (Admin Only)",
+    dependencies=[Depends(require_admin)] # Ensure only admins can access
+)
+async def get_event_document_url(
+    event_id: str = Path(..., description="The MongoDB ObjectId of the event request"),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+    # current_user: dict = Depends(require_admin) # Admin user is implicitly available
+) -> EventDocumentUrlResponse:
+    """
+    Generates and returns a temporary, pre-signed S3 URL for downloading
+    the supporting document associated with a specific event request.
+
+    Requires Admin privileges. The URL expires after a short period (e.g., 60 seconds).
+    """
+    # --- Validate Event ID ---
+    try:
+        event_object_id = ObjectId(event_id)
+    except InvalidId:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid Event ID format: {event_id}")
+
+    # --- Check S3 Configuration ---
+    if not s3_client or not S3_BUCKET_NAME:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="S3 storage is not configured on the server."
+        )
+
+    # --- Fetch Event and Document Key ---
+    try:
+        event = await db.events.find_one(
+            {"_id": event_object_id},
+            {"request_document_key": 1} # Only fetch the needed field
+        )
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Event request with ID {event_id} not found.")
+
+        document_key = event.get("request_document_key")
+        if not document_key:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No supporting document found for event request {event_id}.")
+
+    except HTTPException as http_exc:
+         raise http_exc # Re-raise specific HTTP exceptions
+    except Exception as e:
+        print(f"Database error fetching event {event_id} for document URL: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error retrieving event data.")
+
+    # --- Generate Pre-signed S3 URL ---
+    try:
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET_NAME, 'Key': document_key},
+            ExpiresIn=60  # URL expires in 60 seconds - adjust as needed
+        )
+        print(f"Generated pre-signed URL for key: {document_key}")
+        return EventDocumentUrlResponse(document_url=presigned_url)
+
+    except ClientError as e:
+        print(f"Error generating pre-signed URL for S3 key {document_key}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not generate document download URL.")
+    except Exception as e:
+        print(f"Unexpected error generating pre-signed URL: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
+
 
 # === Endpoint: List All Relevant Event Requests ===
 @router.get(
