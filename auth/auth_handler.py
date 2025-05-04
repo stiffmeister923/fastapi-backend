@@ -9,7 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId
 # Assuming database.py and schemas.py exist and are correctly defined
 from database import get_database
-from schemas import TokenData
+from schemas import TokenData, UserResponse, UserRole
 # Assuming modelsv1.py exists and User is defined
 # from modelsv1 import User
 from dotenv import load_dotenv
@@ -157,5 +157,18 @@ async def get_current_active_user(current_user: dict = Depends(get_current_user)
     # Example check (add a 'disabled' field to your User model/document)
     # if current_user.get("disabled"):
     #     raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+async def require_admin(current_user: UserResponse = Depends(get_current_active_user)):
+    """
+    Dependency that raises an HTTPException if the current user is not an admin.
+    Assumes get_current_active_user returns a dict-like object.
+    """
+    user_role = current_user.get("role")
+    if not user_role or user_role != UserRole.ADMIN.value: # Compare with enum's value
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not permitted. Admin privileges required."
+        )
     return current_user
 

@@ -637,7 +637,7 @@ async def submit_event_preference(
 
 # === Endpoint to Update Event Request Status (Admin Only) ===
 @router.patch(
-    "approve/{event_id}/status",
+    "/update/{event_id}/status",
     response_model=EventResponse,
     status_code=status.HTTP_200_OK,
     summary="Update status, add comment, create schedule on approval"

@@ -151,6 +151,75 @@ async def get_schedules_by_date_range(
 
     return schedules_list
 
+# === NEW Endpoint to Get Schedules with Event Names ===
+@router.post(
+    "/with-event-names", # Use POST as it accepts a request body
+    response_model=List[ScheduleEventInfoResponseItem],
+    summary="Retrieve schedule details including event names based on input list"
+    # Add authentication if needed: dependencies=[Depends(get_current_active_user)]
+)
+async def get_schedules_with_event_names(
+    schedule_requests: List[ScheduleEventInfoRequestItem] = Body(...), # Use the new request schema
+    db: AsyncIOMotorDatabase = Depends(get_database)
+    # current_user: dict = Depends(get_current_active_user) # Uncomment if auth needed
+) -> List[ScheduleEventInfoResponseItem]:
+    """
+    Accepts a list of schedule-like objects, extracts event_ids,
+    fetches corresponding event names, and returns the list enriched with event names.
+    """
+    if not schedule_requests:
+        return [] # Return empty list if request is empty
+
+    event_ids_to_fetch = set()
+    for req in schedule_requests:
+        try:
+            # Validate and add event_id to the set
+            if ObjectId.is_valid(req.event_id):
+                event_ids_to_fetch.add(ObjectId(req.event_id))
+            else:
+                # Optionally log or handle invalid event_ids in the request
+                print(f"Warning: Invalid event_id format '{req.event_id}' in request for schedule '{req._id}'. Skipping.")
+        except Exception as e:
+             print(f"Error processing event_id {req.event_id} from request item {req._id}: {e}")
+             # Decide how to handle: skip this item, raise error? Skipping for now.
+
+    event_names_map: Dict[str, str] = {}
+    if event_ids_to_fetch:
+        try:
+            # Fetch events from DB, projecting only _id and event_name
+            events_cursor = db.events.find(
+                {"_id": {"$in": list(event_ids_to_fetch)}},
+                {"_id": 1, "event_name": 1} # Projection
+            )
+            async for event_doc in events_cursor:
+                event_id_str = str(event_doc["_id"])
+                event_name = event_doc.get("event_name")
+                if event_name: # Only add if name exists
+                    event_names_map[event_id_str] = event_name
+        except Exception as e:
+            print(f"Database error fetching event names: {e}")
+            # Depending on requirements, could raise 500 or proceed without names
+            # raise HTTPException(status_code=500, detail="Failed to retrieve event names.")
+            pass # Proceeding without names if DB fails
+
+    # Construct the response list
+    response_list = []
+    for req_item in schedule_requests:
+        event_name = event_names_map.get(req_item.event_id) # Get name from map, defaults to None
+
+        # Create response object, copying data from request and adding name
+        response_item_data = req_item.model_dump() # Get data from request item
+        response_item_data["event_name"] = event_name if event_name else "Event Name Not Found" # Handle missing names
+
+        try:
+            # Validate the final structure before appending
+            response_obj = ScheduleEventInfoResponseItem(**response_item_data)
+            response_list.append(response_obj)
+        except Exception as validation_error:
+            print(f"Error creating response item for schedule {req_item._id}: {validation_error}")
+            # Optionally append a basic dict or skip this item on validation failure
+
+    return response_list
 
 # === NEW Endpoint to Get OPTIMIZED Schedules by Date Range (Admin Only) ===
 @router.get(
@@ -221,30 +290,10 @@ async def get_schedule_list(
     async for schedule_doc in schedules_cursor:
         try:
             # --- Prepare dictionary for response validation ---
-            response_data_dict: Dict[str, Any] = {}
-            for key, value in schedule_doc.items():
-                if key == "_id":
-                    response_data_dict["id"] = str(value)
-                elif key in ["event_id", "venue_id"] and isinstance(value, ObjectId): # Convert other ObjectIds
-                    response_data_dict[key] = str(value)
-                elif isinstance(value, datetime): # Handle datetime
-                     if value.tzinfo is None:
-                         response_data_dict[key] = value.replace(tzinfo=timezone.utc)
-                     else:
-                         response_data_dict[key] = value.astimezone(timezone.utc)
-                elif isinstance(value, (date, time)): # Handle date/time if used
-                     response_data_dict[key] = value
-                else:
-                    response_data_dict[key] = value
+            processed_schedule = process_schedule_doc(schedule_doc)
+            if processed_schedule: # Only append if processing and validation succeed
+                schedules_list.append(processed_schedule)
 
-            # Ensure required fields for ScheduleResponse are present if needed
-            if "event_id" not in response_data_dict:
-                 print(f"Warning: 'event_id' missing from schedule doc {response_data_dict.get('id')}")
-                 # Handle missing required fields appropriately - skip or raise error
-                 continue # Example: skip this invalid document
-
-            # Validate data against the response model
-            schedules_list.append(ScheduleResponse(**response_data_dict))
             # --- End preparation ---
         except Exception as e:
             # Log validation errors but continue processing others

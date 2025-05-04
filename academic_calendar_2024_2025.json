@@ -1,0 +1,153 @@
+{
+    "academic_year": {
+      "start_date": "2024-07-15",
+      "end_date": "2025-08-01"
+    },
+    "scheduling_constraints": {
+      "hard_constraints": [
+        "No conflicting venues",
+        "Events must be within the defined academic year (July 15, 2024 - August 1, 2025)",
+        "No events during the week leading up to any examination period",
+        "No events during examination periods",
+        "No events during national holidays",
+        "No events during school holidays/breaks",
+        "No events on Sunday",
+        "No events between 22:00 PM and 06:00 AM"
+      ],
+      "soft_constraints": [
+        "Venue preference considered",
+        "Date match preference considered",
+        "Time slot preference considered"
+      ],
+      "venue_constraints": {
+        "ULS": [
+          "Occupied by PE classes every weekday",
+          "Occupied by Varsity training occasionally on weekends"
+        ],
+        "Classrooms": [
+          "Occupied by students daily (likely during class hours)"
+        ]
+      },
+     "standard_venue_blockages": {
+     "Classroom_weekday": [ {"start_time": "07:00", "end_time": "19:00"} ],
+     "ULS_weekday": [ {"start_time": "07:00", "end_time": "19:00"} ],
+     "ULS_weekend_Sat": [ {"day": "Saturday", "start_time": "07:00", "end_time": "20:00"} ]
+  }
+    },
+    "hectic_periods": [
+      {"name": "Students Week", "reference_category": "major_university_wide_events", "date": "Nov 11 - 16"},
+      {"name": "Lasallian Mission Festival", "reference_category": "major_university_wide_events", "date": "Feb 24, 25 & Mar 1"},
+      {"name": "Research Week", "reference_category": "major_university_wide_events", "date": "Apr 21 - 26"},
+      {"name": "Intramurals", "reference_category": "major_university_wide_events", "date": "Mar 31 - Apr 5"}
+    ],
+    "unavailable_dates": {
+      "national_holidays": [
+        {"date": "Aug 21", "event": "Ninoy Aquino Day"},
+        {"date": "Aug 26", "event": "National Heroes’ Day"},
+        {"date": "Nov 30", "event": "Bonifacio Day"},
+        {"date": "Dec 25", "event": "Christmas Day"},
+        {"date": "Dec 30", "event": "Rizal Day"},
+        {"date": "Jan 1", "event": "New Year’s Day"},
+        {"date": "Feb 25", "event": "People Power Anniversary"},
+        {"date": "Apr 9", "event": "Day of Valor"},
+        {"date": "Apr 17", "event": "Maundy Thursday"},
+        {"date": "Apr 18", "event": "Good Friday"},
+        {"date": "May 1", "event": "Labor Day"},
+        {"date": "June 12", "event": "Philippine Independence Day"},
+        {"date": "Nov 26", "event": "Paru-Paro Festival (City of Dasmariñas Day)"},
+        {"date": "Mar 22", "event": "Cavite Day"}
+      ],
+      "school_holidays_breaks": [
+        {"date": "Oct 31 - Nov 2", "event": "School Holiday / All Saints'/Souls' Day Break"},
+        {"date": "Dec 8", "event": "Solemnity of the Immaculate Conception (Special Non-Working)"},
+        {"date": "Dec 21 - Jan 9", "event": "Christmas Break"},
+        {"date": "Dec 24", "event": "Christmas Eve (Part of Break)"},
+        {"date": "Dec 31", "event": "New Year’s Eve (Part of Break)"},
+        {"date": "Jan 10 - 19", "event": "Semester Break"},
+        {"date": "Apr 16", "event": "Holy Wednesday (Start of Holy Week Break)"},
+        {"date": "Apr 19", "event": "Black Saturday (End of Holy Week Break)"}
+      ],
+      "examination_periods": [
+        {"date": "Oct 14 - 19", "event": "Midterm Examinations"},
+        {"date": "Dec 12 - 14", "event": "Final Examinations (Part 1)"},
+        {"date": "Dec 16 - 18", "event": "Final Examinations (Part 2)"},
+        {"date": "Mar 15, 17 - 21", "event": "Midterm Examinations"},
+        {"date": "May 5 - 10", "event": "Final Examinations (Graduating Students)"},
+        {"date": "May 19 - 24", "event": "Final Examinations (Non-Graduating Students)"}
+      ],
+      "major_university_wide_events": [
+        {"date": "Aug 12 - 16", "event": "Freshmen Week"},
+        {"date": "Sep 29", "event": "University Charter Day"},
+        {"date": "Oct 5", "event": "Teachers’ Day Celebration / Memorial Day"},
+        {"date": "Nov 11 - 16", "event": "Students’ Week / Drug Abuse Prevention Week"},
+        {"date": "Dec 3", "event": "Institutional Christmas Lighting Ceremony"},
+        {"date": "Dec 19", "event": "Sectoral Christmas Party"},
+        {"date": "Dec 20", "event": "Institutional & Departmental Christmas Party"},
+        {"date": "Jan 26", "event": "Lasallian Mentor’s Day / 300th Anniv. Bull of Approbation"},
+        {"date": "Feb 24, 25 & Mar 1", "event": "Lasallian Mission Festival"},
+        {"date": "Mar 31 - Apr 5", "event": "Intramurals"},
+        {"date": "Apr 21 - 26", "event": "Research Week"},
+        {"date": "May 15", "event": "Proclamation Anniv. - St. La Salle as Patron of Teachers"},
+        {"date": "June 11", "event": "Luntiang Parangal – Student Recognition"},
+        {"date": "June 13", "event": "Institutional Outing"}
+      ],
+      "academic_closures_adjustments": [
+        {"date": "Aug 19", "event": "Opening of Classes (First Sem)"},
+        {"date": "Oct 21 - 26", "event": "Synchronous Week"},
+        {"date": "Oct 28 - 30", "event": "Independent Learning Days"},
+        {"date": "Jan 10", "event": "Resumption of Offices"},
+        {"date": "Jan 20", "event": "Opening of Classes (Second Sem)"},
+        {"date": "Mar 5", "event": "Ash Wednesday"},
+        {"date": "Apr 14 - 15", "event": "Independent Learning Days"}
+      ],
+      "enrollment_periods": [
+        {"date": "July 15 onwards", "event": "Freshman Enrollment"},
+        {"date": "Aug 5 - 10", "event": "Upperclassman Online Enrollment"},
+        {"date": "Jan 13 - 18", "event": "All College Levels - Online Enrollment"}
+      ],
+      "faculty_staff_events": [
+        {"date": "Aug 5 - 9", "event": "Departmental Start-of-the-Year Workshop Days"},
+        {"date": "Aug 16", "event": "Faculty Organization (FO) Special General Assembly"},
+        {"date": "Nov 20", "event": "FO Regular General Assembly"},
+        {"date": "Dec 4", "event": "Institutional Advent Recollection"},
+        {"date": "Feb 28", "event": "Gawad Sinag - Faculty Recognition"},
+        {"date": "Mar 26", "event": "Institutional Lenten Recollection"},
+        {"date": "May 14", "event": "FO Regular General Assembly"},
+        {"date": "May 23", "event": "Staff Regular General Assembly"},
+        {"date": "June 9 - 11", "event": "Departmental Year-End Workshop Days"}
+      ],
+      "key_academic_deadlines": [
+        {"date": "Aug 15", "event": "Start of Adding/Dropping (with refund)"},
+        {"date": "Aug 30", "event": "Last Day for Dropping (with refund)"},
+        {"date": "Sep 13", "event": "Last Day for Dropping (without refund)"},
+        {"date": "Nov 8", "event": "Deadline - Submission of Midterm Grades"},
+        {"date": "Jan 10", "event": "Deadline - Submission of Final Grades"},
+        {"date": "Jan 20", "event": "Start of Adding/Dropping (with refund)"},
+        {"date": "Jan 31", "event": "Last Day for Dropping (with refund)"},
+        {"date": "Feb 14", "event": "Last Day for Dropping (without refund)"},
+        {"date": "Apr 11", "event": "Deadline - Submission of Midterm Grades"},
+        {"date": "May 24", "event": "Deadline - Final Grades (Graduating)"},
+        {"date": "June 6", "event": "Deadline - Final Grades (Non-Graduating)"}
+      ],
+      "religious_observances_feasts": [
+        {"date": "Aug 13", "event": "Feast of Saint Benilde Romancon"},
+        {"date": "Sep 2", "event": "Feast of Saint Solomon Leclercq"},
+        {"date": "Sep 9 - 13", "event": "Mass of the Holy Spirit per College"},
+        {"date": "Sep 27", "event": "Feast of Blessed Scubilion Rousseau"},
+        {"date": "Oct 7", "event": "Feast of Our Lady of the Holy Rosary"},
+        {"date": "Oct 9", "event": "Feast of Saint Marciano Jose"},
+        {"date": "Oct 23", "event": "Feast of Blessed Arnold Jules-Nicolas Reche"},
+        {"date": "Nov 16", "event": "Feast of Blessed Jose Cecilio"},
+        {"date": "Jan 30", "event": "Feast of Saint Mutien-Marie Wiaux"},
+        {"date": "Feb 9", "event": "Feast of Saint Miguel Febres Cordero"},
+        {"date": "Apr 7", "event": "Feast of Saint John Baptist de La Salle"},
+        {"date": "Apr 30", "event": "Birthday of Saint John Baptist de La Salle"},
+        {"date": "May 8", "event": "Feast of Our Lady of the Star"},
+        {"date": "May 24", "event": "Canonization Anniversary of St. John Baptist de La Salle"}
+      ],
+      "month_long_observances": [
+        {"date": "Aug 1 - 31", "event": "Buwan ng Wika"},
+        {"date": "Sep 21 - Oct 21", "event": "Lasallian Human Rights, Democracy, and Peace Month"}
+      ]
+    }
+  }

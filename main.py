@@ -9,7 +9,8 @@ from routers import (
     venue, 
     equipment,
     events,
-    schedule )# Import equipment
+    schedule,
+    optimization )# Import equipment
 
 import os
 from dotenv import load_dotenv
@@ -46,3 +47,4 @@ app.include_router(venue.router)
 app.include_router(equipment.router)
 app.include_router(events.router)
 app.include_router(schedule.router)
+app.include_router(optimization.router)

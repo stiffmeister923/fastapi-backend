@@ -309,6 +309,46 @@ class ScheduleUpdate(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+class ScheduleEventInfoRequestItem(BaseModel):
+    """Schema for each item in the request body for the event name endpoint."""
+    # Include all fields from the user's example request
+    venue_id: str
+    organization_id: str
+    scheduled_start_time: datetime
+    scheduled_end_time: datetime
+    _id: str # Assuming this is the schedule ID
+    event_id: str
+    is_optimized: bool
+
+    # Add validators for ID formats
+    @field_validator("venue_id", "organization_id", "_id", "event_id")
+    @classmethod
+    def validate_objectid_format(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not ObjectId.is_valid(v):
+            raise ValueError(f"Invalid ObjectId format: {v}")
+        return v
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_encoders={
+            ObjectId: str,
+            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
+        }
+    )
+
+class ScheduleEventInfoResponseItem(ScheduleEventInfoRequestItem):
+    """Schema for each item in the response body, adding the event name."""
+    event_name: Optional[str] = Field(None, description="Name of the associated event")
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        json_encoders={
+            ObjectId: str,
+            datetime: lambda dt: dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z') if isinstance(dt, datetime) else None,
+        }
+    )
+# --- END NEW Schemas ---
+
 class EventRequestStatus(str, Enum):
     PENDING = "Pending"
     APPROVED = "Approved"
